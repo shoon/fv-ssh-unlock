@@ -1,0 +1,66 @@
+version: 2
+project_name: fv-ssh-unlock
+
+before:
+  hooks:
+    - go mod tidy -diff
+
+builds:
+  - id: fv-ssh-unlock
+    main: ./cmd/fv-ssh-unlock
+    binary: fv-ssh-unlock
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -tags=keyring
+      - -trimpath
+    ldflags:
+      - -s -w -buildid= -X main.version={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: default
+    ids:
+      - fv-ssh-unlock
+    name_template: "fv-ssh-unlock_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - LICENSE
+      - NOTICE
+      - THIRD_PARTY_NOTICES.txt
+      - TRADEMARKS.md
+      - SECURITY.md
+      - README.md
+      - assets/fv-ssh-unlock.png
+
+checksum:
+  name_template: "checksums.txt"
+
+sboms:
+  - artifacts: archive
+
+signs:
+  - cmd: cosign
+    signature: "${artifact}.sigstore.json"
+    args:
+      - sign-blob
+      - "--bundle=${signature}"
+      - "${artifact}"
+      - --yes
+    artifacts: checksum
+
+release:
+  draft: false
+  prerelease: auto
