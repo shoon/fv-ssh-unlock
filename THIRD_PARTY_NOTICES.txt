@@ -1,0 +1,108 @@
+THIRD-PARTY SOFTWARE NOTICES AND INFORMATION
+============================================
+
+fv-ssh-unlock incorporates the following third-party open-source software.
+Each component is provided under its own license, reproduced or referenced
+below. This file satisfies the attribution requirements of those licenses.
+
+NOTE FOR MAINTAINERS: This list is maintained by hand and should be regenerated
+authoritatively before each release with a tool such as `go-licenses`:
+
+    go install github.com/google/go-licenses@latest
+    go-licenses save   ./cmd/fv-ssh-unlock --save_path=dist/licenses            # default build
+    go-licenses save   ./cmd/fv-ssh-unlock --save_path=dist/licenses-keyring \
+        --ignore ""    # with GOFLAGS=-tags=keyring for the keyring backend
+    go-licenses report ./cmd/fv-ssh-unlock
+
+Run once with the default build tags and once with `-tags keyring`, since the
+keyring credential backend pulls in additional dependencies.
+
+--------------------------------------------------------------------------------
+Runtime dependencies (compiled into the released binaries)
+--------------------------------------------------------------------------------
+
+github.com/spf13/cobra                          Apache License 2.0
+github.com/spf13/pflag                          BSD 3-Clause License
+github.com/inconshreveable/mousetrap            Apache License 2.0   (Windows)
+github.com/grandcat/zeroconf                    MIT License
+github.com/miekg/dns                            BSD 3-Clause License
+github.com/cenkalti/backoff                     MIT License
+golang.org/x/crypto                             BSD 3-Clause License
+golang.org/x/term                               BSD 3-Clause License
+golang.org/x/sys                                BSD 3-Clause License
+golang.org/x/net                                BSD 3-Clause License
+golang.org/x/text                               BSD 3-Clause License
+
+Additional dependencies when built with the `keyring` build tag:
+
+github.com/zalando/go-keyring                    MIT License
+github.com/godbus/dbus/v5                         BSD 2-Clause License (Linux)
+github.com/danieljoos/wincred                     MIT License          (Windows)
+al.essio.dev/pkg/shellescape                      MIT License
+
+--------------------------------------------------------------------------------
+License texts
+--------------------------------------------------------------------------------
+
+The full text of the Apache License 2.0 is included in this distribution as the
+project LICENSE file.
+
+BSD 3-Clause License (golang.org/x/*, github.com/spf13/pflag, github.com/miekg/dns)
+-----------------------------------------------------------------------------------
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+  1. Redistributions of source code must retain the above copyright notice, this
+     list of conditions and the following disclaimer.
+  2. Redistributions in binary form must reproduce the above copyright notice,
+     this list of conditions and the following disclaimer in the documentation
+     and/or other materials provided with the distribution.
+  3. Neither the name of the copyright holder nor the names of its contributors
+     may be used to endorse or promote products derived from this software
+     without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+EXEMPLARY, OR CONSEQUENTIAL DAMAGES ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+(The Go authors' copyright: "Copyright (c) 2009 The Go Authors. All rights
+reserved." Individual modules carry their own copyright holders.)
+
+MIT License (grandcat/zeroconf, cenkalti/backoff, zalando/go-keyring,
+danieljoos/wincred, al.essio.dev/pkg/shellescape)
+-----------------------------------------------------------------------------------
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in the
+Software without restriction, including without limitation the rights to use,
+copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the
+Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN
+AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+BSD 2-Clause License (github.com/godbus/dbus/v5)
+-----------------------------------------------------------------------------------
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+  1. Redistributions of source code must retain the above copyright notice, this
+     list of conditions and the following disclaimer.
+  2. Redistributions in binary form must reproduce the above copyright notice,
+     this list of conditions and the following disclaimer in the documentation
+     and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+EXEMPLARY, OR CONSEQUENTIAL DAMAGES ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.

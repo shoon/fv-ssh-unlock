@@ -1,0 +1,6 @@
+go 1.26.7
+
+use (
+	.
+	./tools/mock-fv-ssh-server
+)

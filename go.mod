@@ -1,0 +1,25 @@
+module github.com/shoon/fv-ssh-unlock
+
+go 1.26.7
+
+require (
+	github.com/grandcat/zeroconf v1.0.0
+	github.com/spf13/cobra v1.7.0
+	github.com/zalando/go-keyring v0.2.6
+	golang.org/x/crypto v0.54.0
+	golang.org/x/sys v0.47.0
+	golang.org/x/term v0.45.0
+)
+
+require (
+	al.essio.dev/pkg/shellescape v1.5.1 // indirect
+	github.com/cenkalti/backoff v2.2.1+incompatible // indirect
+	github.com/danieljoos/wincred v1.2.2 // indirect
+	github.com/godbus/dbus/v5 v5.1.0 // indirect
+	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/miekg/dns v1.1.27 // indirect
+	github.com/spf13/pflag v1.0.5 // indirect
+	github.com/stretchr/testify v1.11.1 // indirect
+	golang.org/x/net v0.57.0 // indirect
+	golang.org/x/sync v0.17.0 // indirect
+)

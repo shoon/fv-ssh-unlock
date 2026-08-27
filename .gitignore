@@ -1,0 +1,31 @@
+# Build output
+/dist/
+/build/
+/fv-ssh-unlock
+/mock-fv-ssh-server
+tools/mock-fv-ssh-server/mock-server
+tools/mock-fv-ssh-server/mock-fv-ssh-server
+*.exe
+
+# Never commit private keys / secrets
+*.pem
+
+# Coverage output
+coverage.out
+coverage.txt
+coverage.html
+*.cover
+*_coverage.out
+*_coverage.txt
+*_coverage.html
+
+# OS junk
+.DS_Store
+
+# Internal working documents (not part of the public project)
+/Handoff.md
+/Release-Readiness-Report.md
+
+# Mock server ephemeral host key (generated at runtime)
+/mock_host_key
+tools/mock-fv-ssh-server/mock_host_key
