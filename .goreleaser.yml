@@ -42,7 +42,11 @@ archives:
       - THIRD_PARTY_NOTICES.txt
       - TRADEMARKS.md
       - SECURITY.md
+      - CONTRIBUTING.md
       - README.md
+      - docs/*.md
+      - tools/mock-fv-ssh-server/README.md
+      - tools/mock-fv-ssh-server/Tahoe 26.0 FileVault SSH Real Output.txt
       - assets/fv-ssh-unlock.png
 
 checksum:

@@ -1,5 +1,7 @@
 # Mock FileVault SSH server
 
+[Project home](../../README.md) | [Documentation home](../../docs/index.md) | [Development guide](../../docs/development.md)
+
 This development-only SSH server models observed FileVault pre-boot protocols.
 Its default is the complete session captured from macOS 26.0.1; it can also
 model a later prompt-only `OpenSSH_10.2` session. Use it to exercise `status`,
@@ -220,3 +222,7 @@ exclusive.
 The redacted source transcript is
 [`Tahoe 26.0 FileVault SSH Real Output.txt`](Tahoe%2026.0%20FileVault%20SSH%20Real%20Output.txt).
 It contains no passwords or host keys.
+
+---
+
+[Project home](../../README.md) | [Documentation home](../../docs/index.md) | [Development guide](../../docs/development.md)
