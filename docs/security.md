@@ -124,8 +124,16 @@ FileVault during password-free discovery, scanning, or status checks.
 ## Credential handling
 
 Release binaries can store credentials in the client OS keyring. Headless
-systems can receive scoped environment secrets. A single-device invocation can
-use a hidden prompt or standard input.
+systems can receive scoped environment secrets or externally managed files
+from mechanisms such as Docker Swarm secrets and systemd credentials. A
+single-device invocation can use a hidden prompt or standard input.
+
+Run `fv-ssh-unlock credentials providers` inside the execution environment to
+see which providers are built, available, persistent, and considered secure.
+The tool never falls back from a failed secure provider to plaintext disk
+storage. An ordinary credential file is refused unless
+`--allow-unsafe-credential-storage` is supplied for that command; this override
+is intentionally not persisted.
 
 Passwords are never stored in `devices.json`. Avoid command-line arguments,
 shared scripts, and shell history. Use a unique password for each target, keep

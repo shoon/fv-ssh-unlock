@@ -59,7 +59,14 @@ aliases in the client configuration; they do not create DNS records.
 
 Choose a credential source for each device when prompted. A release binary can
 save each password in the client operating system's keyring. For headless
-automation, inject a separate environment secret for every device:
+automation, prefer a Docker Swarm secret, systemd credential, or another
+externally managed file and inspect the environment first:
+
+```bash
+fv-ssh-unlock credentials providers
+```
+
+Scoped runtime environment secrets also remain available for every device:
 
 ```bash
 export FV_UNLOCK_PASSWORD_LAB_1='first-device-password'
@@ -130,12 +137,12 @@ After enrollment, `status` reports one of three evidence-based states:
 
 - `locked` when the trusted SSH server presents the distinctive FileVault
   locked explanation;
-- `unlocked` when normal macOS SSH accepts a public key; or
-- `unknown` when neither state can be proved without a password.
+- `booted` when normal macOS SSH accepts a public key; or
+- `indeterminate` when neither state can be proved without a password.
 
 A recent FileVault server was observed showing only the generic hidden
 `Password:` prompt. That prompt is not distinguishable from a password-only
-booted SSH server, so `unknown` is correct and does not prevent an explicit
+booted SSH server, so `indeterminate` is correct and does not prevent an explicit
 unlock. Read [Password-free status checks](unlocking-and-status.md#password-free-status-checks)
 for details.
 
@@ -148,8 +155,10 @@ fv-ssh-unlock unlock my-mac --identity ~/.ssh/id_ed25519
 ```
 
 The identity is an unencrypted private key authorized by normal macOS SSH. It
-is used only after password acceptance to prove that normal macOS finished
-booting. The pre-boot server still requires the FileVault password.
+first lets the client detect that no unlock is needed when the Mac is already
+booted, and after password acceptance it proves that normal macOS returned.
+The pre-boot server cannot accept this key and still requires the FileVault
+password.
 
 ```text
 Attempt 1/10: Unlocking unlockuser@192.0.2.10:22
@@ -170,12 +179,12 @@ option.
 
 ## Unlock several Macs
 
-Pass target names to unlock a selected group, or omit names to unlock every
-configured target:
+Pass target names to unlock a selected group, or use `--all` explicitly to
+unlock every configured target:
 
 ```bash
 fv-ssh-unlock unlock office-mac lab-mac
-fv-ssh-unlock unlock
+fv-ssh-unlock unlock --all
 ```
 
 Configure every credential in advance. The tool reports each result

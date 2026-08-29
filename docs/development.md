@@ -32,7 +32,7 @@ development.
 
 ## Build the client
 
-Build the environment-variable credential variant:
+Build with runtime and external-file credential providers:
 
 ```bash
 go build ./...
@@ -142,7 +142,7 @@ MOCK_FV_PASSWORD='test-only-secret' \
 ```
 
 The SSH version is configurable test data, not a classification signal. With
-this variant, `status` should report `unknown` after key enrollment, while
+this variant, `status` should report `indeterminate` after key enrollment, while
 `unlock --no-verify` should succeed. This matches the client's intended
 separation between password-free evidence and an operator-requested unlock.
 

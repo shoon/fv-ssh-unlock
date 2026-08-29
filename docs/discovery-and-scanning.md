@@ -24,7 +24,7 @@ use different mechanisms and answer different questions.
 | Resolve `my-mac.local` | Performs an mDNS hostname lookup. | The hostname currently maps to an address. It says nothing about a service advertisement. |
 | Test TCP/22 | Uses `nc`, `Test-NetConnection`, or another connection check. | Something accepts connections at the address and port. It does not identify FileVault. |
 | `scan` | Connects to TCP/22 in an explicit IPv4 CIDR and performs a password-free SSH handshake. | Which addresses answer SSH, their public host-key fingerprints, and limited banner evidence. |
-| `status` | Connects to one configured target and verifies its pinned SSH key. | A locked banner, accepted public key, or conservative `unknown` state. |
+| `status` | Connects to one configured target and verifies its pinned SSH key. | A locked banner, accepted public key, or conservative `indeterminate` state. |
 
 ## Bonjour discovery
 

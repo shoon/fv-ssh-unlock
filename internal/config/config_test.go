@@ -61,6 +61,10 @@ func TestValidateDeviceRejectsAmbiguousOrUnsafeValues(t *testing.T) {
 		{Name: base.Name, Host: base.Host, User: " bad", Port: 22},
 		{Name: base.Name, Host: base.Host, User: base.User, Port: 65536},
 		{Name: base.Name, Host: base.Host, User: base.User, Port: 22, Cred: "fvu-another-device"},
+		{Name: base.Name, Host: base.Host, User: base.User, Port: 22, Cred: base.Cred, CredentialSource: "file"},
+		{Name: base.Name, Host: base.Host, User: base.User, Port: 22, Cred: base.Cred, CredentialSource: "file", CredentialRef: "relative/password"},
+		{Name: base.Name, Host: base.Host, User: base.User, Port: 22, Cred: base.Cred, CredentialSource: "file", CredentialRef: "systemd:../password"},
+		{Name: base.Name, Host: base.Host, User: base.User, Port: 22, Cred: base.Cred, CredentialSource: "runtime", CredentialRef: "/run/secrets/password"},
 		{Name: base.Name, Host: base.Host, User: base.User, Port: 22, MACAddress: "not-a-mac"},
 	}
 	for _, d := range cases {
@@ -70,6 +74,16 @@ func TestValidateDeviceRejectsAmbiguousOrUnsafeValues(t *testing.T) {
 	}
 	if err := ValidateDevice(base); err != nil {
 		t.Fatalf("valid device rejected: %v", err)
+	}
+	fileCredential := base
+	fileCredential.CredentialSource = "file"
+	fileCredential.CredentialRef = filepath.Join(t.TempDir(), "one")
+	if err := ValidateDevice(fileCredential); err != nil {
+		t.Fatalf("valid file credential rejected: %v", err)
+	}
+	fileCredential.CredentialRef = "systemd:one"
+	if err := ValidateDevice(fileCredential); err != nil {
+		t.Fatalf("valid systemd credential reference rejected: %v", err)
 	}
 	ipv6 := base
 	ipv6.Host = "2001:db8::1"
@@ -147,6 +161,31 @@ func TestConfigWithPort(t *testing.T) {
 	}
 	if devs[0].Port != 2222 {
 		t.Fatalf("expected port 2222, got %d", devs[0].Port)
+	}
+}
+
+func TestFileCredentialReferenceRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "devices.json")
+	credentialPath := filepath.Join(t.TempDir(), "office-mac")
+	s := &Store{Path: path}
+	want := Device{
+		Name:             "office-mac",
+		Host:             "192.0.2.10",
+		User:             "unlockuser",
+		Port:             22,
+		Cred:             "fvu-office-mac",
+		CredentialSource: "file",
+		CredentialRef:    credentialPath,
+	}
+	if err := s.Add(want); err != nil {
+		t.Fatal(err)
+	}
+	devices, err := s.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(devices) != 1 || devices[0] != want {
+		t.Fatalf("loaded devices = %+v, want %+v", devices, want)
 	}
 }
 

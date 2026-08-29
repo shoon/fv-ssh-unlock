@@ -57,14 +57,17 @@ Mac, and no background service or cloud account is required.
 | `scan` | Checks TCP/22 in an explicit IPv4 CIDR without sending credentials. | Find a pre-boot Mac that is no longer advertising Bonjour. |
 | `config add` | Saves a target's address, port, local user, and credential source. | Refer to known Macs by short names. |
 | `config list`, `show`, `remove` | Manages saved targets. | Use the same client for one Mac or a lab fleet. |
-| `status` | Reports `locked`, `unlocked`, or `unknown` without sending the FileVault password. | Check reachability and safely enroll an SSH host key. |
+| `credentials providers` | Reports which credential providers are built, available, and secure in the current environment. | Detect keyring, service-secret delivery, and future TPM2 support before configuring automation. |
+| `status` | Reports `locked`, `booted`, or `indeterminate` without sending the FileVault password. | Check reachability and safely enroll an SSH host key. |
 | `unlock` | Unlocks one, several, or all configured targets. | Recover remote Macs after restarts or power events. |
 | `completion` | Generates completion for Bash, Zsh, Fish, or PowerShell. | Makes repeated command-line use faster. |
 | `--help`, `--version` | Shows command help and build information. | Supports scripting and troubleshooting. |
 
-The client also provides SSH host-key pinning, OS-keyring and environment
-credential sources, configurable retries, public-key boot verification,
-IPv4/IPv6 target support, custom SSH ports, and terminal-safe diagnostics.
+The client also provides SSH host-key pinning, OS-keyring, externally managed
+credential-file, and runtime credential sources, configurable retries,
+public-key boot verification, IPv4/IPv6 target support, custom SSH ports, and
+terminal-safe diagnostics. Plaintext disk credential files fail closed unless
+the operator explicitly allows them for that invocation.
 
 ```mermaid
 flowchart LR
@@ -111,6 +114,13 @@ fv-ssh-unlock config add my-mac \
   --port 22
 ```
 
+Before choosing storage for unattended use, inspect the exact workstation,
+service, or container environment:
+
+```bash
+fv-ssh-unlock credentials providers
+```
+
 `my-mac` is a local alias. `unlockuser` is an example account name, not an
 account created by the tool. It must be a real local user that can unlock
 FileVault and use Remote Login. A standard, non-administrator account is
@@ -142,7 +152,7 @@ fv-ssh-unlock status my-mac \
   --identity ~/.ssh/id_ed25519
 ```
 
-Enrollment never sends the FileVault password. A result of `unknown` can be
+Enrollment never sends the FileVault password. A result of `indeterminate` can be
 normal if no public key proves that normal macOS is running.
 
 ### 4. Restart and unlock
@@ -195,7 +205,7 @@ Start with the guide that matches what you are trying to do:
 | [Configuration and credentials](docs/configuration-and-credentials.md) | You need to manage devices, passwords, keyring entries, or configuration files. |
 | [Status and unlocking](docs/unlocking-and-status.md) | You need result meanings, retry behavior, boot verification, or multi-device operation. |
 | [Security](docs/security.md) | You need the threat model, host-key workflow, privacy details, or secure-use guidance. |
-| [Troubleshooting](docs/troubleshooting.md) | A host key, connection, password, discovery, DNS, or verification check failed. |
+| [Troubleshooting](docs/troubleshooting.md) | A host key, connection, credential provider, discovery, DNS, or verification check failed. |
 | [CLI reference](docs/cli-reference.md) | You need commands, flags, environment-variable rules, or shell completion. |
 | [Development](docs/development.md) | You want to build, test, contribute, or use the mock FileVault SSH server. |
 

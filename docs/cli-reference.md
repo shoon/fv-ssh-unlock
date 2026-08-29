@@ -18,11 +18,12 @@ fv-ssh-unlock completion powershell --help
 | `fv-ssh-unlock config add [name] --host HOST --user USER` | Add a target. |
 | `fv-ssh-unlock config list` | List targets and credential sources. |
 | `fv-ssh-unlock config show NAME` | Show one target. |
-| `fv-ssh-unlock config remove [name...]` | Remove named targets; no names means all after confirmation. |
+| `fv-ssh-unlock config remove [name...]` | Remove named targets; use `--all` explicitly for every target. |
+| `fv-ssh-unlock credentials providers` | Report provider build, availability, persistence, and security status for this machine. |
 | `fv-ssh-unlock discover` | List booted hosts advertising SSH through Bonjour. It does not connect or test FileVault. |
 | `fv-ssh-unlock scan --cidr CIDR` | Actively find SSH servers, public key fingerprints, pinned-target matches, and password-free banner evidence. |
 | `fv-ssh-unlock status [name...]` | Check state without sending a password. No names means all targets. |
-| `fv-ssh-unlock unlock [name...]` | Unlock named targets. No names means all targets. |
+| `fv-ssh-unlock unlock [name...]` | Unlock named targets; use `--all` explicitly for every target. |
 | `fv-ssh-unlock completion SHELL` | Generate Bash, Zsh, Fish, or PowerShell completion. |
 | `fv-ssh-unlock --version` | Print the build version. |
 
@@ -48,25 +49,55 @@ value is used as the device name.
 | `--port <number>` | `22` | SSH port. |
 | `--user <name>` | required | Existing local FileVault-enabled Remote Login user. |
 | `--success-message <text>` | built-in English text | Exact text that indicates accepted unlock. |
+| `--credential-source <source>` | `auto` | Credential source: `auto`, `runtime`, `keyring`, or `file`. |
+| `--credential-file <reference>` | none | Absolute path or `systemd:<name>` reference for the externally managed `file` source. |
+| `--allow-unsafe-credential-storage` | off | Permit an unverified plaintext disk credential file for this command only. |
 
 Examples:
 
 ```bash
 fv-ssh-unlock config add my-mac --host 192.0.2.10 --user unlockuser
 fv-ssh-unlock config add lab-mac --host 2001:db8::20 --user admin --port 2222
+fv-ssh-unlock config add rack-mac --host 192.0.2.30 --user unlockuser \
+  --credential-source file --credential-file /run/secrets/rack-mac
+fv-ssh-unlock config add service-mac --host 192.0.2.31 --user unlockuser \
+  --credential-source file --credential-file systemd:service-mac
 ```
+
+`auto` offers secure keyring storage only when that provider appears usable;
+otherwise it configures runtime input. It never falls back to a plaintext file.
+An external-file reference may be configured before the service mounts it, but
+it is reassessed whenever `unlock` reads it.
 
 ## Other `config` commands
 
 ```text
 fv-ssh-unlock config list
-fv-ssh-unlock config show [name]
+fv-ssh-unlock config show NAME
 fv-ssh-unlock config remove [name...]
+fv-ssh-unlock config remove --all [--yes]
 ```
 
-`config remove` with no names asks for confirmation before removing all saved
-targets. A keyring-enabled binary also deletes credentials associated with the
+`config remove --all` asks for confirmation before removing all saved targets;
+`--yes` skips that prompt for automation. Omitting both names and `--all` is an
+error. A keyring-enabled binary also deletes credentials associated with the
 removed device identifiers.
+
+## `credentials providers`
+
+```text
+fv-ssh-unlock credentials providers [--json] [--require-secure]
+```
+
+The report distinguishes providers included in the binary from providers that
+are usable in the current session. It also reports whether secure persistent
+storage or service-scoped delivery was detected. TPM2 appears in the report but
+is not marked built or available until an actual sealing provider exists.
+
+Use `--json` for machine-readable fields including `built`, `available`,
+`persistent`, `security`, and `secure_storage_available`.
+Use `--require-secure` as a service preflight check that exits unsuccessfully
+when no verified secure persistent provider or delivery mechanism is detected.
 
 ## `discover`
 
@@ -110,11 +141,15 @@ fv-ssh-unlock status [name...] [flags]
 | Flag | Default | Purpose |
 | --- | --- | --- |
 | `--accept-new-host-key` | off | Trust and save an unknown key after independent fingerprint verification. Never overrides a changed key. |
-| `--identity <path>` | none | Unencrypted private key used to prove normal macOS is booted; repeatable. |
+| `--identity <path>` | standard `~/.ssh` identities | Select an unencrypted private key used to prove normal macOS is booted; repeatable. |
 | `--insecure-host-key` | off | Disable SSH host-key verification. Unsafe. |
+| `--require-known` | off | Exit unsuccessfully when any reachable target remains indeterminate. |
 | `--verbose` | off | Print sanitized diagnostic detail. |
 
-`status` never loads or sends the FileVault password.
+`status` never loads or sends the FileVault password. Without `--identity`, it
+tries keys from `ssh-agent` and regular standard identity files such as
+`~/.ssh/id_ed25519` and `~/.ssh/id_rsa`. An explicit identity must be
+unencrypted; add encrypted identities to `ssh-agent` instead.
 
 ## `unlock`
 
@@ -124,13 +159,18 @@ fv-ssh-unlock unlock [name...] [flags]
 
 | Flag | Default | Purpose |
 | --- | --- | --- |
-| `--identity <path>` | none | Unencrypted private key for deterministic post-boot verification; repeatable. |
+| `--all` | off | Unlock every configured target. Cannot be combined with names. |
+| `--identity <path>` | standard `~/.ssh` identities | Select an unencrypted private key for deterministic post-boot verification; repeatable. |
 | `--insecure-host-key` | off | Disable SSH host-key verification. This can expose the password to an impersonated host. |
 | `--no-verify` | off | Stop after pre-boot password acceptance. |
 | `--retry-attempts <number>` | `10` | Maximum connection attempts. |
 | `--retry-delay <duration>` | `30s` | Delay between transient failures. |
 | `--verify-timeout <duration>` | `5m` | Time to wait for normal macOS SSH after acceptance. |
 | `--verbose` | off | Print sanitized SSH and diagnostic detail. |
+| `--allow-unsafe-credential-storage` | off | Permit reading an unverified plaintext disk credential file for this command only. |
+
+At least one target name or `--all` is required. Before connecting, a named
+multi-target invocation verifies that every name exists and is unique.
 
 ## Credential environment variables
 

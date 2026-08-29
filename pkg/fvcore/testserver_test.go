@@ -49,6 +49,9 @@ type testServerConfig struct {
 	// the "unlocked" state. This mirrors the real device: authorized_keys lives
 	// on the data volume, so the pre-boot server can never honor public keys.
 	authorizedKey ssh.PublicKey
+	// holdAfterSuccess keeps the server-side authentication callback open after
+	// sending the success banner, matching observed real pre-boot behavior.
+	holdAfterSuccess <-chan struct{}
 }
 
 // startTestServer starts the server on an ephemeral loopback port and returns
@@ -135,6 +138,9 @@ func startTestServer(t *testing.T, cfg testServerConfig) *testServer {
 				// Emit the success banner as an info-only challenge, then fail
 				// auth and disconnect, as on the real device.
 				_, _ = challenge("", cfg.successMsg, nil, nil)
+				if cfg.holdAfterSuccess != nil {
+					<-cfg.holdAfterSuccess
+				}
 				return nil, fmt.Errorf("unlocked; closing connection")
 			}
 			return nil, fmt.Errorf("permission denied")

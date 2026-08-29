@@ -14,10 +14,10 @@ local user.
 | [Getting started](getting-started.md) | Requirements, client installation, release verification, preparing a target Mac, choosing an unlock user, stable addressing, and removal. |
 | [Use cases](use-cases.md) | Task-based paths for known Macs, new targets, discovery, one-device unlocks, and fleet operation. |
 | [Discovery and scanning](discovery-and-scanning.md) | Bonjour discovery, active IPv4 scanning, `.local` names, SSH banners, host-key matching, and scan safety. |
-| [Configuration and credentials](configuration-and-credentials.md) | Adding and managing devices, OS-keyring storage, environment secrets, interactive input, custom success text, and local files. |
+| [Configuration and credentials](configuration-and-credentials.md) | Adding and managing devices, provider capability reports, OS-keyring storage, Docker/systemd secret files, environment secrets, interactive input, custom success text, and local files. |
 | [Status and unlocking](unlocking-and-status.md) | Host-key enrollment, status meanings, unlock results, retries, public-key boot verification, and multi-device behavior. |
 | [Security](security.md) | Threat model, SSH host-key safety, credential handling, protocol constraints, privacy, and secure deployment guidance. |
-| [Troubleshooting](troubleshooting.md) | Host-key, connection, password, discovery, DNS, configuration, and post-unlock verification problems. |
+| [Troubleshooting](troubleshooting.md) | Host-key, connection, credential-provider, discovery, DNS, configuration, and post-unlock verification problems. |
 | [CLI reference](cli-reference.md) | Commands, flags, environment-variable naming, shell completion, and common examples. |
 | [Development](development.md) | Source builds, test matrix, limitations, contribution guidance, and the mock FileVault SSH server. |
 
@@ -30,7 +30,7 @@ local user.
 | The target has not been prepared yet. | Start with [Prepare a new Mac](getting-started.md#prepare-a-new-mac). |
 | You do not know which booted host is the Mac. | Use [Bonjour discovery](discovery-and-scanning.md#bonjour-discovery). |
 | The Mac restarted and no longer appears in Bonjour. | Use its reserved address or follow [Active IPv4 scanning](discovery-and-scanning.md#active-ipv4-scanning). |
-| You need to understand `locked`, `unlocked`, or `unknown`. | Read [Password-free status checks](unlocking-and-status.md#password-free-status-checks). |
+| You need to understand `locked`, `booted`, or `indeterminate`. | Read [Password-free status checks](unlocking-and-status.md#password-free-status-checks). |
 | An unlock reports `SUCCESS` but not `VERIFIED`. | Read [Post-unlock verification](unlocking-and-status.md#post-unlock-verification). |
 | Something failed. | Go to [Troubleshooting](troubleshooting.md). |
 
@@ -59,7 +59,9 @@ independently verify and pin the target's SSH host key with `status`.
 - A DHCP reservation is preferred. FileVault pre-boot may answer TCP/22 while
   Bonjour discovery and `.local` resolution are unavailable.
 - A generic hidden `Password:` prompt is not a unique FileVault fingerprint.
-  The tool reports ambiguous password-free evidence as `unknown`.
+  The tool reports ambiguous password-free evidence as `indeterminate`.
+- Run `credentials providers` as the user, service, or container that will
+  perform unlocks before selecting an unattended credential source.
 - `SUCCESS` proves that the trusted pre-boot server accepted the password.
   `VERIFIED` additionally proves that normal macOS SSH returned and accepted a
   public key.

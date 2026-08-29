@@ -10,9 +10,10 @@ command offers it; network-controlled text is sanitized before display.
 - [`unknown host ... presented SHA256:...`](#unknown-host--presented-sha256)
 - [`host key ... has CHANGED`](#host-key--has-changed)
 - [Connection refused or timed out](#connection-refused-or-timed-out)
-- [`status` reports `unknown`](#status-reports-unknown)
+- [`status` reports `indeterminate`](#status-reports-indeterminate)
 - [Unlock was accepted but not verified](#unlock-was-accepted-but-not-verified)
 - [Password is rejected or missing](#password-is-rejected-or-missing)
+- [Credential provider or unsafe-storage error](#credential-provider-or-unsafe-storage-error)
 - [Discovery finds no devices](#discovery-finds-no-devices)
 - [Scan finds SSH but cannot prove FileVault](#scan-finds-ssh-but-cannot-prove-filevault)
 - [A `.local` name does not resolve](#a-local-name-does-not-resolve)
@@ -85,7 +86,7 @@ Test-NetConnection -ComputerName 192.0.2.10 -Port 22
 An open port proves only that something is listening, not that it is the
 FileVault pre-boot service.
 
-## `status` reports `unknown`
+## `status` reports `indeterminate`
 
 This is a safe evidence result, not a password-handling error. An observed
 FileVault pre-boot server showed only the generic hidden `Password:` prompt.
@@ -93,14 +94,15 @@ A booted password-only SSH server can show the same prompt, so the client does
 not guess.
 
 To positively prove that normal macOS is booted, authorize a public key for the
-account and either load the corresponding private key into `ssh-agent` or pass
-an unencrypted key explicitly:
+account. The client automatically tries keys in `ssh-agent` and standard
+regular identity files such as `~/.ssh/id_ed25519` and `~/.ssh/id_rsa`. Pass an
+unencrypted key explicitly if it has another name:
 
 ```bash
 fv-ssh-unlock status my-mac --identity ~/.ssh/id_ed25519
 ```
 
-An `unknown` status does not mean an explicit `unlock` will fail. The unlock
+An `indeterminate` status does not mean an explicit `unlock` will fail. The unlock
 command can answer the exact supported prompt after the pinned host key is
 verified.
 
@@ -113,7 +115,8 @@ Verification is a second, password-free step. It can fail or time out because:
 - the address changed;
 - Remote Login is unavailable after boot;
 - no public key is authorized for the normal macOS user;
-- no suitable key is loaded in `ssh-agent` or passed with `--identity`; or
+- no suitable key is available from `ssh-agent`, a standard `~/.ssh` identity,
+  or `--identity`; or
 - a firewall or network transition blocks the booted SSH service.
 
 Try normal `ssh`, increase `--verify-timeout`, or run a later status check:
@@ -141,6 +144,37 @@ be proved.
 
 The client does not retry a rejected password. Repeated automatic attempts
 would add risk and cannot fix an invalid credential.
+
+## Credential provider or unsafe-storage error
+
+Inspect capabilities as the same user and inside the same service or container
+that runs the unlock command:
+
+```bash
+fv-ssh-unlock credentials providers
+fv-ssh-unlock credentials providers --json
+```
+
+`built: yes` means the binary contains the provider. `available: yes` means it
+appears usable in the current execution environment. For example, a
+keyring-enabled Linux binary may still lack a Secret Service D-Bus session.
+TPM2 hardware can be reported as detected while the provider remains
+unavailable; the current binary does not claim TPM-backed protection until a
+complete direct sealing backend exists. A systemd service may still use a
+TPM2-encrypted systemd credential through the `file` provider.
+
+The file provider accepts recognized service-scoped delivery without an
+override when its filesystem is verified as memory-backed: systemd's
+`$CREDENTIALS_DIRECTORY`, or a Linux file below `/run/secrets`. An ordinary
+disk bind mount remains a plaintext disk file and fails closed. Use a Swarm
+secret, systemd credential, OS keyring, or runtime injection when possible.
+For systemd services, configure `systemd:<credential-name>` so the provider
+resolves the unit-specific `$CREDENTIALS_DIRECTORY` at runtime.
+
+If a plaintext file is intentional, both the configuration action and every
+unlock that reads it must explicitly include
+`--allow-unsafe-credential-storage`. The acknowledgement is never saved and
+does not enable a fallback from another provider.
 
 ## Discovery finds no devices
 

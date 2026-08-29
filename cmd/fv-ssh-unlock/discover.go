@@ -41,6 +41,7 @@ func newDiscoverCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "discover",
 		Short: "List booted, Bonjour-advertised SSH services on the local network",
+		Args:  cobra.NoArgs,
 		Long: `Browse the local network for SSH services advertised over mDNS/Bonjour
 and print their names, hostnames, ports, and IP addresses.
 
@@ -68,6 +69,9 @@ responders more time.`,
 			timeout, _ := cmd.Flags().GetDuration("timeout")
 			verbose, _ := cmd.Flags().GetBool("verbose")
 			iface, _ := cmd.Flags().GetString("interface")
+			if timeout <= 0 {
+				return fmt.Errorf("--timeout must be greater than zero")
+			}
 			return discoverDevices(cmd.Context(), timeout, iface, verbose)
 		},
 	}

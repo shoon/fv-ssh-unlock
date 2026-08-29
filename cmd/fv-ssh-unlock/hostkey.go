@@ -39,7 +39,11 @@ func newSSHClient(verbose, insecure, acceptNew bool, identityFiles []string) (*f
 		return nil, errors.New("--insecure-host-key and --accept-new-host-key cannot be used together")
 	}
 	c := &fvcore.RealSSHClient{DialTimeout: 15 * time.Second, Verbose: verbose}
-	c.Signers = loadSigners(verbose, identityFiles)
+	signers, err := loadSigners(verbose, identityFiles)
+	if err != nil {
+		return nil, err
+	}
+	c.Signers = signers
 	if insecure {
 		c.InsecureIgnoreHostKey = true
 		fmt.Fprintln(os.Stderr, "warning: host-key verification disabled (--insecure-host-key); the FileVault password may be exposed to a man-in-the-middle")

@@ -29,6 +29,7 @@ type Device struct {
 	Port             int    `json:"port,omitempty"`
 	Cred             string `json:"cred"`
 	CredentialSource string `json:"credential_source,omitempty"`
+	CredentialRef    string `json:"credential_ref,omitempty"`
 	SuccessMessage   string `json:"success_message,omitempty"`
 	MACAddress       string `json:"mac_address,omitempty"`
 }
@@ -196,8 +197,18 @@ func ValidateDevice(d Device) error {
 	if d.Port < 0 || d.Port > 65535 {
 		return fmt.Errorf("port must be zero (legacy default) or between 1 and 65535")
 	}
-	if d.CredentialSource != "" && d.CredentialSource != "keyring" && d.CredentialSource != "runtime" {
+	if d.CredentialSource != "" && d.CredentialSource != credentials.ProviderKeyring && d.CredentialSource != credentials.ProviderRuntime && d.CredentialSource != credentials.ProviderFile {
 		return fmt.Errorf("invalid credential source %q", d.CredentialSource)
+	}
+	if d.CredentialSource == credentials.ProviderFile {
+		if err := validatePlain("credential reference", d.CredentialRef, 4096); err != nil {
+			return err
+		}
+		if _, err := credentials.NormalizeFileReference(d.CredentialRef); err != nil {
+			return err
+		}
+	} else if d.CredentialRef != "" {
+		return fmt.Errorf("credential reference is only valid with the file credential source")
 	}
 	if d.Cred != "" {
 		if err := validatePlain("credential identifier", d.Cred, 256); err != nil {
