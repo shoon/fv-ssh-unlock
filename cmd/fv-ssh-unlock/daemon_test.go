@@ -101,6 +101,65 @@ func TestDaemonLoggingOptionsAndStructuredEvent(t *testing.T) {
 	}
 }
 
+func TestDaemonStructuredLogEscapesUntrustedLineBreaks(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	events := make(chan monitor.Event, 1)
+	events <- monitor.Event{
+		Sequence: 1,
+		Type:     monitor.EventUnlockResult,
+		Device:   "mac\r\nevent=forged",
+		State:    monitor.StateError,
+		Message:  "dial failed\nlevel=INFO event=device.booted",
+	}
+	close(events)
+	logMonitorEvents(logger, events)
+
+	if got := bytes.Count(output.Bytes(), []byte{'\n'}); got != 1 {
+		t.Fatalf("structured logger emitted %d physical records, want 1: %q", got, output.String())
+	}
+	var entry map[string]any
+	if err := json.Unmarshal(output.Bytes(), &entry); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := entry["device"], `mac\u000D\u000Aevent=forged`; got != want {
+		t.Fatalf("device = %#v, want %#v", got, want)
+	}
+	if got, want := entry["detail"], `dial failed\u000Alevel=INFO event=device.booted`; got != want {
+		t.Fatalf("detail = %#v, want %#v", got, want)
+	}
+}
+
+func TestCandidateLogEscapesUntrustedLineBreaks(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
+	logCandidateResults(logger, "scan\r\nlevel=ERROR", []candidates.IngestResult{{
+		Created: true,
+		Candidate: candidates.Candidate{
+			ID:        "cand_safe\nevent=forged",
+			State:     candidates.StateDiscovered,
+			Hostnames: []string{"mac.local\r\nmsg=forged"},
+		},
+	}})
+
+	if got := bytes.Count(output.Bytes(), []byte{'\n'}); got != 1 {
+		t.Fatalf("candidate logger emitted %d physical records, want 1: %q", got, output.String())
+	}
+	var entry map[string]any
+	if err := json.Unmarshal(output.Bytes(), &entry); err != nil {
+		t.Fatal(err)
+	}
+	for field, want := range map[string]string{
+		"candidate_id": `cand_safe\u000Aevent=forged`,
+		"source":       `scan\u000D\u000Alevel=ERROR`,
+		"hostname":     `mac.local\u000D\u000Amsg=forged`,
+	} {
+		if got := entry[field]; got != want {
+			t.Fatalf("%s = %#v, want %#v", field, got, want)
+		}
+	}
+}
+
 func TestDaemonLoggingOptionsRejectInvalidValues(t *testing.T) {
 	for _, flags := range [][]string{
 		{"--socket", filepath.Join(t.TempDir(), "control.sock"), "--log-format", "xml"},

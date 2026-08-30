@@ -23,6 +23,17 @@ func TestTerminalSafeEscapesNetworkControlledText(t *testing.T) {
 	}
 }
 
+func TestTerminalSafeInlineEscapesLogForgingLineBreaks(t *testing.T) {
+	got := terminalSafeInline("trusted\r\nlevel=ERROR msg=forged\nnext")
+	want := `trusted\u000D\u000Alevel=ERROR msg=forged\u000Anext`
+	if got != want {
+		t.Fatalf("terminalSafeInline() = %q, want %q", got, want)
+	}
+	if strings.ContainsAny(got, "\r\n") {
+		t.Fatalf("terminalSafeInline() retained a record separator: %q", got)
+	}
+}
+
 func TestTerminalSafeMultilineNormalizesCarriageReturns(t *testing.T) {
 	got := terminalSafeMultiline("first\r\nsecond\roverwrite")
 	want := "first\nsecond\\u000Doverwrite"

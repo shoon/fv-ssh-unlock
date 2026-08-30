@@ -181,7 +181,7 @@ func runDaemon(ctx context.Context, output io.Writer, opts daemonOptions) (retur
 	if !opts.once {
 		defer func() {
 			if returnErr != nil {
-				logger.Error("daemon exited with an error", "event", "daemon.failed", "error", returnErr)
+				logger.Error("daemon exited with an error", "event", "daemon.failed", "error", terminalSafeError(returnErr))
 			}
 		}()
 	}
@@ -282,7 +282,7 @@ func runDaemon(ctx context.Context, output io.Writer, opts daemonOptions) (retur
 		}
 		errCh <- err
 	}()
-	logger.Info("daemon started", "event", "daemon.started", "devices", len(configured), "socket", opts.socket, "data_dir", dataDir)
+	logger.Info("daemon started", "event", "daemon.started", "devices", len(configured), "socket", terminalSafeInline(opts.socket), "data_dir", terminalSafeInline(dataDir))
 
 	completed := 0
 	var componentErr error
@@ -380,19 +380,19 @@ func logMonitorEvents(logger *slog.Logger, events <-chan monitor.Event) {
 			"event", monitorLogEventName(event),
 			"event_time", event.Time,
 			"sequence", event.Sequence,
-			"device", event.Device,
-			"state", event.State,
-			"observation", event.Observation,
+			"device", terminalSafeInline(event.Device),
+			"state", terminalSafeInline(string(event.State)),
+			"observation", terminalSafeInline(string(event.Observation)),
 			"lock_episode", event.LockEpisode,
 			"auto_unlock", event.AutoUnlock,
 			"endpoint_down", event.EndpointDown,
 			"latched", event.Latched,
 		}
 		if event.FailureKind != "" {
-			attrs = append(attrs, "failure_kind", event.FailureKind)
+			attrs = append(attrs, "failure_kind", terminalSafeInline(string(event.FailureKind)))
 		}
 		if event.Message != "" {
-			attrs = append(attrs, "detail", event.Message)
+			attrs = append(attrs, "detail", terminalSafeInline(event.Message))
 		}
 		switch event.Type {
 		case monitor.EventProbe:
@@ -750,7 +750,7 @@ func runCandidateDiscovery(ctx context.Context, inbox *candidates.Inbox, opts da
 			runPeriodic(ctx, opts.discoverInterval, func(roundCtx context.Context) {
 				results, err := discoverCandidates(roundCtx, inbox, opts)
 				if err != nil && roundCtx.Err() == nil {
-					logger.Warn("Bonjour candidate discovery failed", "event", "discovery.failed", "source", "bonjour", "error", err)
+					logger.Warn("Bonjour candidate discovery failed", "event", "discovery.failed", "source", "bonjour", "error", terminalSafeError(err))
 					return
 				}
 				logCandidateResults(logger, "bonjour", results)
@@ -765,7 +765,7 @@ func runCandidateDiscovery(ctx context.Context, inbox *candidates.Inbox, opts da
 			runPeriodic(ctx, opts.scanInterval, func(roundCtx context.Context) {
 				results, err := scanCandidates(roundCtx, inbox, opts)
 				if err != nil && roundCtx.Err() == nil {
-					logger.Warn("active candidate scan failed", "event", "discovery.failed", "source", "active-scan", "error", err)
+					logger.Warn("active candidate scan failed", "event", "discovery.failed", "source", "active-scan", "error", terminalSafeError(err))
 					return
 				}
 				logCandidateResults(logger, "active-scan", results)
@@ -784,11 +784,11 @@ func runCandidateDiscovery(ctx context.Context, inbox *candidates.Inbox, opts da
 			}
 			expired, err := inbox.Expire()
 			if err != nil {
-				logger.Warn("candidate expiration failed", "event", "candidate.expiration_failed", "error", err)
+				logger.Warn("candidate expiration failed", "event", "candidate.expiration_failed", "error", terminalSafeError(err))
 				return
 			}
 			for _, id := range expired {
-				logger.Info("candidate expired", "event", "candidate.expired", "candidate_id", id)
+				logger.Info("candidate expired", "event", "candidate.expired", "candidate_id", terminalSafeInline(id))
 			}
 		})
 	}()
@@ -800,16 +800,16 @@ func logCandidateResults(logger *slog.Logger, source string, results []candidate
 	for _, result := range results {
 		candidate := result.Candidate
 		attrs := []any{
-			"candidate_id", candidate.ID,
-			"candidate_state", candidate.State,
-			"source", source,
+			"candidate_id", terminalSafeInline(candidate.ID),
+			"candidate_state", terminalSafeInline(string(candidate.State)),
+			"source", terminalSafeInline(source),
 			"observed_at", candidate.LastSeen,
 		}
 		if len(candidate.Endpoints) > 0 {
-			attrs = append(attrs, "endpoint", net.JoinHostPort(candidate.Endpoints[0].Address, fmt.Sprint(candidate.Endpoints[0].Port)))
+			attrs = append(attrs, "endpoint", terminalSafeInline(net.JoinHostPort(candidate.Endpoints[0].Address, fmt.Sprint(candidate.Endpoints[0].Port))))
 		}
 		if len(candidate.Hostnames) > 0 {
-			attrs = append(attrs, "hostname", candidate.Hostnames[0])
+			attrs = append(attrs, "hostname", terminalSafeInline(candidate.Hostnames[0]))
 		}
 		if result.Created {
 			logger.Info("SSH host candidate detected", append([]any{"event", "candidate.discovered"}, attrs...)...)
@@ -952,7 +952,7 @@ func (a *daemonAPI) handleClearLatch(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, err)
 		return
 	}
-	a.logger.Info("device safety latch cleared by operator", "event", "device.latch_cleared", "device", name)
+	a.logger.Info("device safety latch cleared by operator", "event", "device.latch_cleared", "device", terminalSafeInline(name))
 	writeAPIJSON(w, http.StatusOK, map[string]any{"schema_version": controlAPISchemaVersion, "changed": true})
 }
 
@@ -978,7 +978,7 @@ func (a *daemonAPI) handleIgnore(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, err)
 		return
 	}
-	a.logger.Info("candidate ignored by operator", "event", "candidate.ignored", "candidate_id", candidate.ID)
+	a.logger.Info("candidate ignored by operator", "event", "candidate.ignored", "candidate_id", terminalSafeInline(candidate.ID))
 	writeAPIJSON(w, http.StatusOK, candidate)
 }
 
@@ -990,7 +990,7 @@ func (a *daemonAPI) handleRestore(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, err)
 		return
 	}
-	a.logger.Info("candidate restored by operator", "event", "candidate.restored", "candidate_id", candidate.ID)
+	a.logger.Info("candidate restored by operator", "event", "candidate.restored", "candidate_id", terminalSafeInline(candidate.ID))
 	writeAPIJSON(w, http.StatusOK, candidate)
 }
 
@@ -1076,14 +1076,14 @@ func (a *daemonAPI) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	}
 	verified := candidate
 	if updated, markErr := a.inbox.MarkVerified(candidate.ID); markErr != nil {
-		a.logger.Warn("device enrolled but candidate state update failed", "event", "candidate.state_update_failed", "device", device.Name, "candidate_id", candidate.ID, "error", markErr)
+		a.logger.Warn("device enrolled but candidate state update failed", "event", "candidate.state_update_failed", "device", terminalSafeInline(device.Name), "candidate_id", terminalSafeInline(candidate.ID), "error", terminalSafeError(markErr))
 	} else {
 		verified = updated
 	}
 	if refreshErr := refreshConfiguredCandidates(a.inbox); refreshErr != nil {
-		a.logger.Warn("device enrolled but configured-candidate labels could not refresh", "event", "candidate.label_refresh_failed", "device", device.Name, "error", refreshErr)
+		a.logger.Warn("device enrolled but configured-candidate labels could not refresh", "event", "candidate.label_refresh_failed", "device", terminalSafeInline(device.Name), "error", terminalSafeError(refreshErr))
 	}
-	a.logger.Info("candidate enrolled", "event", "candidate.enrolled", "candidate_id", candidate.ID, "device", device.Name, "endpoint", deviceEndpoint(device), "auto_unlock", device.AutoUnlock)
+	a.logger.Info("candidate enrolled", "event", "candidate.enrolled", "candidate_id", terminalSafeInline(candidate.ID), "device", terminalSafeInline(device.Name), "endpoint", terminalSafeInline(deviceEndpoint(device)), "auto_unlock", device.AutoUnlock)
 	writeAPIJSON(w, http.StatusCreated, struct {
 		SchemaVersion int                  `json:"schema_version"`
 		Device        config.Device        `json:"device"`

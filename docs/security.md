@@ -232,7 +232,9 @@ API request bodies must never be logged, including at `debug` level. Tests use
 sentinel secrets and banners to enforce that boundary.
 
 Logs do include device aliases, endpoints, candidate hostnames, state
-transitions, timestamps, and sanitized error details. That metadata can expose
+transitions, timestamps, and sanitized error details. Untrusted carriage
+returns, line feeds, and other control characters are rendered visibly rather
+than being allowed to create or rewrite log records. That metadata can expose
 inventory and recovery activity. Restrict journal, Docker-log, and SIEM
 access; encrypt forwarding; set an appropriate retention period; and avoid
 copying complete logs into public issues.

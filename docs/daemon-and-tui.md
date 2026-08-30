@@ -255,6 +255,8 @@ JSON logs never contain credential values, SSH private-key bodies, raw SSH or
 FileVault banners, authentication answers, environment-variable values, or
 control-API request bodies. They do contain security-relevant metadata such as
 device names, endpoints, candidate hostnames, states, and sanitized errors.
+Untrusted CR, LF, and other control characters are escaped so one event cannot
+forge another physical log record.
 Restrict log access and configure retention accordingly.
 
 ## Persistent candidate discovery
