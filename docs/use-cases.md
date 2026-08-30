@@ -8,6 +8,8 @@ the detailed guide for decisions and failure handling.
 ## Contents
 
 - [Discover candidate Macs before setup](#discover-candidate-macs-before-setup)
+- [Keep homelab Macs available after a power outage](#keep-homelab-macs-available-after-a-power-outage)
+- [Enroll a new Mac from the persistent candidate inbox](#enroll-a-new-mac-from-the-persistent-candidate-inbox)
 - [Add several known Macs](#add-several-known-macs)
 - [Prepare a new Mac](#prepare-a-new-mac)
 - [Enroll a host key and identify state](#enroll-a-host-key-and-identify-state)
@@ -38,6 +40,135 @@ fv-ssh-unlock scan --cidr 192.168.1.0/24
 
 Read [Discovery and scanning](discovery-and-scanning.md) before treating scan
 evidence or a generic password prompt as identification.
+
+## Keep homelab Macs available after a power outage
+
+Use an always-on Linux server or Raspberry Pi as the controller when the Macs
+may lose power but the controller, switch, and router remain available. The
+daemon can observe each Mac return to FileVault pre-boot, release one authorized
+credential, and prove that normal macOS SSH comes back without depending on
+ICMP ping.
+
+Prepare the site before relying on unattended recovery:
+
+1. Keep the controller and required network equipment on suitable backup power.
+2. Configure each Mac to start after power is restored.
+3. Give each Mac a DHCP reservation usable by FileVault pre-boot.
+4. Enable FileVault and Remote Login, select the FileVault user, and authorize a
+   dedicated SSH public key in normal macOS.
+5. Provision a secure service credential for each target. Runtime environment
+   passwords are intentionally rejected for automatic unlock.
+6. Add each device with automatic unlock enabled and independently pin its host
+   key while macOS is booted.
+
+For a systemd credential reference, configuration might look like:
+
+```bash
+fv-ssh-unlock config add m4alpha \
+  --host 192.168.1.42 \
+  --user unlockuser \
+  --credential-source file \
+  --credential-file systemd:m4alpha \
+  --auto-unlock
+
+fv-ssh-unlock status m4alpha \
+  --identity /var/lib/fv-ssh-unlock/id_ed25519 \
+  --accept-new-host-key
+```
+
+Run the one-pass test while the Mac is booted, then supervise the foreground
+daemon with systemd or a container runtime:
+
+```bash
+fv-ssh-unlock daemon --once \
+  --identity /var/lib/fv-ssh-unlock/id_ed25519
+
+fv-ssh-unlock daemon \
+  --identity /var/lib/fv-ssh-unlock/id_ed25519 \
+  --scan-cidr 192.168.1.0/24
+```
+
+The sequence after an outage is deliberately conservative:
+
+```text
+unreachable → locked → unlocking → booting → booted
+```
+
+`unreachable` never triggers a credential. Only the complete FileVault locked
+banner can enter the automatic-unlock path. The attempt is durably recorded
+before the password is retrieved, and an accepted or ambiguous submission is
+followed by password-free SSH verification rather than another submission.
+
+Reconnect to the controller and open the dashboard at any time:
+
+```bash
+fv-ssh-unlock tui
+```
+
+It is safe to leave that command displayed in `tmux`, `screen`, or `zellij`;
+the separately supervised daemon continues if the terminal disconnects. If a
+credential or pinned-host-key failure latches a Mac, correct and independently
+verify the cause, then use `l` in the TUI to acknowledge it.
+
+A FileVault implementation that exposes only a generic `Password:` prompt is
+reported as `indeterminate` and will not auto-unlock. That target still requires
+an explicit manual `unlock` operation. Read [Persistent daemon and terminal
+dashboard](daemon-and-tui.md) for the full state and retry policy.
+
+## Enroll a new Mac from the persistent candidate inbox
+
+Use this workflow to turn “the new Mac appeared on the LAN” into a managed
+target without copying a network-supplied key into configuration blindly.
+
+On the Mac, complete the preparation steps in [Prepare a new Mac](#prepare-a-new-mac)
+and leave normal macOS booted. On the controller, start the daemon with Bonjour
+and an explicitly authorized active-scan range:
+
+```bash
+fv-ssh-unlock daemon \
+  --identity /var/lib/fv-ssh-unlock/id_ed25519 \
+  --discover-interval 5m \
+  --scan-cidr 192.168.1.0/24 \
+  --scan-interval 15m
+```
+
+Both discovery rounds run immediately at startup. Bonjour may first create a
+`discovered` candidate with no fingerprint. The daemon's active scan—not the
+one-shot `scan` command—adds the fingerprint to the persistent inbox and moves
+it to `identity_pending`.
+
+Open another terminal:
+
+```bash
+fv-ssh-unlock tui
+```
+
+Then:
+
+1. Press `a` and select the candidate.
+2. At the Mac, run the fingerprint command printed by the TUI:
+
+   ```bash
+   ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+   ```
+
+3. Type the complete locally displayed `SHA256:...` fingerprint. The shortened
+   value in the table and the network scan alone are not acceptable trust
+   sources.
+4. Confirm the alias, reserved address, port, and macOS/FileVault username.
+5. Leave automatic unlock at its default `no` for monitoring only, or select
+   `yes` and reference a secure credential provisioned before enrollment.
+
+The daemon reconnects expecting exactly that fingerprint, pins it, saves the
+device, and begins monitoring it immediately. No restart is needed for a device
+enrolled through the TUI. A mismatch stops before the candidate is trusted or
+configured.
+
+Press `i` instead when the SSH host is not a Mac you want to manage. Ignored
+candidates persist across later scans and expiration. Persistent discovery
+never enrolls a candidate or enables automatic unlock without this operator
+workflow. See [Persistent candidate discovery](daemon-and-tui.md#persistent-candidate-discovery)
+for intervals, CIDR limits, and API alternatives.
 
 ## Add several known Macs
 

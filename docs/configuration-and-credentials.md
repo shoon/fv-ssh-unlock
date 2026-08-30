@@ -10,6 +10,8 @@ interactive prompt, or standard input.
 
 - [Add a device](#add-a-device)
 - [Manage devices](#manage-devices)
+- [Automatic unlock policy](#automatic-unlock-policy)
+- [Declarative configuration](#declarative-configuration)
 - [Credentials](#credentials)
 - [Inspect available providers](#inspect-available-providers)
 - [OS keyring](#os-keyring)
@@ -79,6 +81,47 @@ For non-interactive teardown, `config remove --all --yes` skips the bulk-removal
 confirmation. A bare `config remove` is rejected so an omitted name cannot
 accidentally become a fleet-wide operation.
 
+## Automatic unlock policy
+
+Automatic unlock is an explicit per-device choice and defaults off:
+
+```bash
+fv-ssh-unlock config add my-mac --host 192.0.2.10 --user unlockuser \
+  --credential-source file --credential-file /run/secrets/my-mac \
+  --auto-unlock
+
+fv-ssh-unlock config auto-unlock my-mac --enable
+fv-ssh-unlock config auto-unlock my-mac --disable
+```
+
+A running daemon loads external configuration changes after restart. Devices
+enrolled through its TUI/API are added to the live monitor immediately. Policy
+authorization alone is insufficient: daemon startup and enrollment also
+require the selected provider to be available and verified secure in that
+exact runtime environment.
+
+Configuration validation rejects `auto_unlock: true` with a `runtime` source
+up front. A file or keyring reference can be configured before service start,
+but the daemon still performs a reference-specific availability and security
+preflight in its actual runtime environment.
+
+## Declarative configuration
+
+Export the strict, password-free JSON inventory for review or infrastructure
+tooling:
+
+```bash
+fv-ssh-unlock config export > devices.json
+fv-ssh-unlock config apply --file devices.json --check --json
+fv-ssh-unlock config apply --file devices.json
+```
+
+`config apply` validates the complete document before atomically replacing the
+inventory. `--file -` reads JSON from standard input. The JSON may contain
+credential provider references but the schema has no credential-value field.
+Configuration-management tools should restart the daemon only when the result
+reports `changed: true`.
+
 ## Credentials
 
 Passwords are never written to `devices.json`. Choose a source appropriate for
@@ -88,7 +131,7 @@ the client environment:
 | --- | --- | --- |
 | OS keyring | Interactive workstations. | Recommended when an unlocked desktop keyring is available. |
 | Externally managed file | Docker Swarm secrets, systemd credentials, and secret-manager agents. | Secure delivery is verified for recognized service-scoped memory mounts; the program never creates or modifies the file. |
-| Environment variable | Headless automation and secret-manager injection. | Set a separate, scoped variable for each target. |
+| Environment variable | One-shot operator or CI invocations. | Set a separate, scoped variable for each target; the persistent daemon refuses it for automatic unlock. |
 | Hidden prompt | One target in an interactive terminal. | Used when no configured credential is available. |
 | Standard input | Piping one secret from a secret manager. | Intended for a single-device invocation. |
 
@@ -209,6 +252,10 @@ The override is deliberately not saved in `devices.json` and never enables an
 automatic fallback. Runtime environment, standard-input, and hidden-prompt
 credentials do not require it because the program does not persist them.
 
+The persistent daemon deliberately has no unsafe-storage override. An
+auto-enabled device must use a keyring that is secure and available to the
+service or a verified memory-backed external credential.
+
 ## Environment variables
 
 The name is `FV_UNLOCK_PASSWORD_<DEVICE>`. The device alias is uppercased, and
@@ -238,6 +285,11 @@ ambiguous environment-variable names.
 Environment variables are scoped to the process environment. A variable set in
 one shell, scheduled task, or service is not automatically available to
 another.
+
+Do not pass FileVault credentials as Docker container environment variables.
+They can be exposed through container configuration and are not accepted for
+unattended automatic unlock. Use a Swarm secret or another memory-backed
+service credential instead.
 
 ## Interactive prompt or standard input
 
@@ -274,13 +326,26 @@ pre-authentication banner cannot forge an accepted unlock.
 
 ## Local files and privacy
 
-State is stored beneath the current user's home directory:
+State is stored beneath the current user's home directory by default. Set the
+global `--data-dir /absolute/path` or `FV_SSH_UNLOCK_DATA_DIR` for a dedicated
+service/container directory:
+
+On Unix, an existing data directory must already be private (mode `0700`). The
+program creates a missing directory privately, but deliberately refuses an
+existing group/world-accessible directory instead of changing its permissions.
+This makes a mistaken value such as `/tmp` fail safely without chmodding a
+shared system directory. Create and assign the service directory explicitly
+before startup.
 
 | File | Contents |
 | --- | --- |
 | `~/.fv-ssh-unlock/devices.json` | Device aliases, hosts, ports, users, credential source references, and optional success messages. Never passwords. |
 | `~/.fv-ssh-unlock/known_hosts` | Pinned SSH host public keys. |
 | `~/.fv-ssh-unlock/known_hosts.lock` | Lock file used to serialize host-key enrollment. |
+| `~/.fv-ssh-unlock/monitor-state.json` | Durable state, lock episodes, cooldowns, and latches. Never credential values. |
+| `~/.fv-ssh-unlock/candidates.json` | Untrusted discovery inbox, fingerprints, addresses, review state, and timestamps. |
+| `~/.fv-ssh-unlock/daemon.lock` | Process lock that prevents two persistent controllers from sharing one data directory. |
+| `~/.fv-ssh-unlock/control.sock` | Mode `0600` local daemon API socket while the service is running. |
 
 On Windows, `~` is the current user's profile directory. Configuration files
 are size limited, schema validated, written atomically, and restricted to the

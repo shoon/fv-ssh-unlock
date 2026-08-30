@@ -141,3 +141,20 @@ func TestProviderReportJSON(t *testing.T) {
 		t.Fatalf("unexpected JSON report: %+v", decoded)
 	}
 }
+
+func TestWriteStatusJSONPreservesEmptyArray(t *testing.T) {
+	var out bytes.Buffer
+	if err := writeStatusJSON(&out, []statusReport{}); err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		SchemaVersion int             `json:"schema_version"`
+		Devices       json.RawMessage `json:"devices"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.SchemaVersion != 1 || string(decoded.Devices) != "[]" {
+		t.Fatalf("unexpected empty status JSON: %s", out.String())
+	}
+}

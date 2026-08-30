@@ -56,11 +56,46 @@ func detectedSecureFileDelivery() (bool, string) {
 		if secure, detail := platformSecureCredentialDirectory(directory); secure {
 			return true, "systemd service credential directory detected; " + detail + "; other file paths are assessed when used"
 		}
+		if secure, detail := secureCredentialFileIn(directory); secure {
+			return true, "systemd service credential detected; " + detail + "; other file paths are assessed when used"
+		}
 	}
 	if secure, detail := platformSecureCredentialDirectory("/run/secrets"); secure {
 		return true, detail + "; other file paths are assessed when used"
 	}
+	// Docker Swarm may mount each secret as an individual memory-backed file
+	// while leaving the containing /run/secrets directory on the container's
+	// root filesystem. Inspect bounded directory entries so the machine report
+	// agrees with the reference-specific security check used by the daemon.
+	if secure, detail := secureCredentialFileIn("/run/secrets"); secure {
+		return true, detail + "; other file paths are assessed when used"
+	}
 	return false, "external file delivery by absolute path or systemd:<name>; secure for verified memory-backed service secret mounts, plaintext disk files require explicit opt-in"
+}
+
+func secureCredentialFileIn(directory string) (bool, string) {
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return false, ""
+	}
+	const maxEntries = 256
+	for i, entry := range entries {
+		if i >= maxEntries {
+			break
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		path := filepath.Join(directory, entry.Name())
+		info, err := entry.Info()
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		if secure, detail := platformSecureCredentialFile(path, info); secure {
+			return true, detail
+		}
+	}
+	return false, ""
 }
 
 func pathWithin(base, path string) bool {

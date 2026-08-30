@@ -114,6 +114,23 @@ func discoverDevices(ctx context.Context, timeout time.Duration, iface string, v
 		}
 	}
 	fmt.Printf("Discovering Bonjour-advertised SSH services (up to %v)...\n", timeout)
+	found, rounds, err := collectBonjourDevices(ctx, timeout, ifaces, verbose)
+	if err != nil {
+		return err
+	}
+	printDevices(found, rounds)
+	return nil
+}
+
+// collectBonjourDevices performs the bounded browse without printing the final
+// report. The daemon reuses it to feed its untrusted candidate inbox.
+func collectBonjourDevices(ctx context.Context, timeout time.Duration, ifaces []net.Interface, verbose bool) (map[string]*device, int, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if timeout <= 0 {
+		timeout = defaultDiscoverTimeout
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -151,12 +168,10 @@ func discoverDevices(ctx context.Context, timeout time.Duration, iface string, v
 		// Every service failed on the first round and nothing was found: the
 		// resolver is unusable (no multicast interface, permissions, etc.).
 		if rounds == 1 && len(found) == 0 && firstErr != nil {
-			return fmt.Errorf("failed to browse for services: %w", firstErr)
+			return nil, rounds, fmt.Errorf("failed to browse for services: %w", firstErr)
 		}
 	}
-
-	printDevices(found, rounds)
-	return nil
+	return found, rounds, nil
 }
 
 // browseRound runs one bounded browse of a single service type and merges

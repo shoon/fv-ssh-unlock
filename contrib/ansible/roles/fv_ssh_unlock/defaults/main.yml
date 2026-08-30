@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+
+---
+# This default matches an extracted GoReleaser archive. Override it with
+# "{{ playbook_dir }}/../../dist/fv-ssh-unlock" in a source checkout.
+fv_ssh_unlock_binary_source: "{{ playbook_dir }}/../../fv-ssh-unlock"
+fv_ssh_unlock_binary_path: /usr/local/bin/fv-ssh-unlock
+fv_ssh_unlock_unit_source: "{{ playbook_dir }}/../../deploy/systemd/fv-ssh-unlock.service"
+fv_ssh_unlock_service_user: fv-ssh-unlock
+fv_ssh_unlock_service_group: fv-ssh-unlock
+# Existing encrypted systemd credential blobs to attach to the service. The
+# role never creates these blobs or handles their plaintext values.
+fv_ssh_unlock_systemd_credentials: []
+# Set to the credential name containing the dedicated macOS SSH private key.
+fv_ssh_unlock_identity_credential: ""
+# Optional controller-side path to an independently verified OpenSSH
+# known_hosts file. null preserves the managed host's existing trust store.
+fv_ssh_unlock_known_hosts_source: null
+# Set this to a list of non-secret device mappings to manage devices.json.
+# null leaves an existing inventory unchanged.
+fv_ssh_unlock_devices: null

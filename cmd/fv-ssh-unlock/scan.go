@@ -178,6 +178,17 @@ type scanFinding struct {
 func runActiveScan(ctx context.Context, addresses []netip.Addr, port int, user string, timeout time.Duration, concurrency int, pinned map[string][]string, verbose bool) error {
 	fmt.Printf("Active password-free scan of %d IPv4 address(es) on TCP/%d...\n", len(addresses), port)
 	fmt.Println("No passwords, identity keys, host-key enrollments, or configuration changes are used.")
+	found, err := collectActiveScan(ctx, addresses, port, user, timeout, concurrency, pinned)
+	if err != nil {
+		return err
+	}
+	printScanFindings(found, len(addresses), verbose)
+	return nil
+}
+
+// collectActiveScan runs the bounded password-free worker pool without
+// printing. It is shared by the one-shot scan command and daemon discovery.
+func collectActiveScan(ctx context.Context, addresses []netip.Addr, port int, user string, timeout time.Duration, concurrency int, pinned map[string][]string) ([]scanFinding, error) {
 
 	jobs := make(chan netip.Addr)
 	findings := make(chan scanFinding, concurrency)
@@ -217,11 +228,10 @@ func runActiveScan(ctx context.Context, addresses []netip.Addr, port int, user s
 		found = append(found, finding)
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return nil, err
 	}
 	sort.Slice(found, func(i, j int) bool { return found[i].address.Compare(found[j].address) < 0 })
-	printScanFindings(found, len(addresses), verbose)
-	return nil
+	return found, nil
 }
 
 func probeScanTarget(parent context.Context, address netip.Addr, port int, user string, timeout time.Duration) (scanFinding, bool) {

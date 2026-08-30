@@ -12,10 +12,13 @@ see [SECURITY.md](../SECURITY.md).
 ## Contents
 
 - [Threat model](#threat-model)
+- [Automatic-unlock safety](#automatic-unlock-safety)
 - [SSH host-key enrollment](#ssh-host-key-enrollment)
 - [Changed host keys](#changed-host-keys)
 - [Unlock protocol constraints](#unlock-protocol-constraints)
 - [Credential handling](#credential-handling)
+- [Operational log safety](#operational-log-safety)
+- [Daemon socket and persistent state](#daemon-socket-and-persistent-state)
 - [Account and network guidance](#account-and-network-guidance)
 - [Discovery and scan safety](#discovery-and-scan-safety)
 - [Local data and privacy](#local-data-and-privacy)
@@ -53,6 +56,63 @@ The tool does not protect against a compromised client account, a compromised
 target that still owns its legitimate host key, malware that can read an
 unlocked keyring or process environment, or an operator approving the wrong
 fingerprint.
+
+The persistent daemon makes the always-on Linux host a security boundary. An
+attacker who controls that operating system, its root account, the Docker
+daemon, or the running `fv-ssh-unlock` process can observe credentials when
+they are retrieved for use. A TPM, systemd credential, Swarm secret, or keyring
+can improve storage and delivery; none can conceal a password from a process
+which must submit it, or from a privileged attacker controlling that process.
+Harden and update the controller, restrict administrator access, and avoid
+running unrelated untrusted workloads under the same security authority.
+
+## Automatic-unlock safety
+
+Automatic unlock is disabled per device unless `auto_unlock` is explicitly
+enabled. It can be selected at creation time with `config add --auto-unlock` or
+changed with:
+
+```bash
+fv-ssh-unlock config auto-unlock my-mac --enable
+fv-ssh-unlock config auto-unlock my-mac --disable
+```
+
+The daemon loads existing device policy at startup. Restart it after changing
+an already configured device with a separate `config` command. Enrollment
+through the running TUI is added to the monitor immediately.
+
+The daemon releases a credential only after a password-free probe verifies the
+pinned SSH host key and observes the complete, supported FileVault locked
+banner. TCP/22 reachability, a generic hidden `Password:` prompt, Bonjour,
+ICMP, a remembered address, or a previously locked state is not sufficient.
+`indeterminate` and `unreachable` devices never cause password release.
+
+For prompt recovery after an outage, the daemon may use a short TCP/22 connect
+as a preliminary wake-up signal after an auto-enabled endpoint is known down.
+This is deliberately not ICMP-dependent. TCP success merely wakes the full
+pinned, password-free SSH probe; it is never treated as FileVault evidence or
+permission to retrieve a credential.
+
+The monitor treats each conclusively observed locked-to-booted cycle as one
+lock episode. Before calling the credential path it atomically records the
+episode, attempt marker, and cooldown in `monitor-state.json`. Once a
+credential has been submitted, an accepted result or an unacknowledged network
+transition moves the device to `booting`; the daemon verifies with
+password-free SSH and does not submit the credential again in that episode.
+Only a definitive `booted` observation closes the episode. A connection
+failure known to have occurred before submission may be retried with bounded
+exponential backoff.
+
+A rejected or unavailable credential enters `credential-failed`. A changed
+pinned host key enters `error`. Both security failures latch across polls and
+daemon restarts; the daemon does not automatically clear them. Correct and
+independently verify the cause before selecting `[l] clear latch` in
+`fv-ssh-unlock tui`. Clearing a latch deliberately permits another attempt,
+subject to the persisted cooldown.
+
+Do not delete `monitor-state.json` merely to recover a device. Removing it also
+removes durable episode, cooldown, and latch protection. Stop the daemon and
+preserve the file while investigating a state-file error.
 
 ## SSH host-key enrollment
 
@@ -140,8 +200,77 @@ shared scripts, and shell history. Use a unique password for each target, keep
 the client account secure, and rely on the operating system or approved secret
 manager to control secret access.
 
+Unattended operation has stricter rules than an operator-requested `unlock`.
+If any auto-unlock device uses the `runtime` provider, including an environment
+variable, `fv-ssh-unlock daemon` refuses to start. It also rejects an
+unavailable or unverified file/keyring source during startup and enrollment.
+The daemon has no `--allow-unsafe-credential-storage` option. Use a verified
+keyring or memory-backed service delivery such as a systemd credential or
+Docker Swarm secret. Run provider inspection in the daemon's actual service or
+container environment, not only in an interactive login shell:
+
+```bash
+fv-ssh-unlock credentials providers --require-secure
+```
+
+The daemon retrieves a credential only in the unlock operation. Credential
+values are not written to configuration, `monitor-state.json`, the candidate
+inbox, daemon logs, event messages, TUI snapshots, or control-API responses.
+Those outputs do contain operational metadata such as device names, addresses,
+credential provider references, fingerprints, states, errors, and timestamps;
+protect them accordingly.
+
 See [Credentials](configuration-and-credentials.md#credentials) for the exact
 sources and environment-variable naming rules.
+
+## Operational log safety
+
+The daemon's text and JSON handlers receive sanitized operational events, not
+SSH transcripts. Credential values, authentication answers, environment
+variable values, SSH private-key bodies, raw SSH/FileVault banners, and local
+API request bodies must never be logged, including at `debug` level. Tests use
+sentinel secrets and banners to enforce that boundary.
+
+Logs do include device aliases, endpoints, candidate hostnames, state
+transitions, timestamps, and sanitized error details. That metadata can expose
+inventory and recovery activity. Restrict journal, Docker-log, and SIEM
+access; encrypt forwarding; set an appropriate retention period; and avoid
+copying complete logs into public issues.
+
+The daemon sends no logs over the network itself. It writes standard output and
+standard error so an existing systemd journal, Docker logging driver, Fluent
+Bit, or Vector deployment can apply the site's transport and access policy.
+See [Operational logging and SIEM collection](daemon-and-tui.md#operational-logging-and-siem-collection).
+
+## Daemon socket and persistent state
+
+The daemon exposes its health, monitoring, enrollment, poll, and latch actions
+only on a Unix-domain socket. It never opens a TCP control listener. By default
+the socket is `~/.fv-ssh-unlock/control.sock`; `--data-dir` changes the default
+directory, and `--socket` or `FV_SSH_UNLOCK_SOCKET` can select another absolute
+path. The socket is mode `0600` inside a mode `0700` directory. Symbolic links
+and non-socket objects at the path are refused.
+
+Filesystem access to this socket is administrative access: a permitted local
+user can view device and candidate metadata, force a poll, clear a security
+latch, and enroll a candidate after supplying the expected fingerprint. Run
+the daemon and TUI as the intended service account, do not place the socket in
+a shared directory, and do not proxy it onto an unauthenticated network
+listener.
+
+The control client uses only the selected Unix socket and does not honor HTTP
+proxy variables or fall back to TCP. Point commands at a nondefault socket
+consistently:
+
+```bash
+fv-ssh-unlock healthcheck --socket /absolute/path/control.sock
+fv-ssh-unlock tui --socket /absolute/path/control.sock
+```
+
+`monitor-state.json` is atomically replaced with mode `0600`. The monitor does
+not rewrite it on every healthy poll, which limits unnecessary storage wear,
+but persists security-relevant episode, attempt, cooldown, and latch
+transitions before they can authorize later behavior.
 
 ## Account and network guidance
 

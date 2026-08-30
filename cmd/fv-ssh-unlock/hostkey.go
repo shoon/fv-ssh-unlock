@@ -16,19 +16,17 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 
+	"github.com/shoon/fv-ssh-unlock/internal/securefs"
 	"github.com/shoon/fv-ssh-unlock/pkg/fvcore"
 )
 
 // knownHostsPath is where trusted host keys are recorded.
 func knownHostsPath() (string, error) {
-	home, err := os.UserHomeDir()
+	dir, err := appDataDir()
 	if err != nil {
-		return "", fmt.Errorf("find home directory: %w", err)
+		return "", err
 	}
-	if home == "" {
-		return "", errors.New("find home directory: empty path")
-	}
-	return filepath.Join(home, ".fv-ssh-unlock", "known_hosts"), nil
+	return filepath.Join(dir, "known_hosts"), nil
 }
 
 // newSSHClient builds an SSH client with host-key verification. When insecure
@@ -71,6 +69,14 @@ func newSSHClient(verbose, insecure, acceptNew bool, identityFiles []string) (*f
 // booted OS, so a key pinned here is valid across the locked -> unlocked
 // boundary.
 func hostKeyCallback(path string, acceptNew bool) (ssh.HostKeyCallback, error) {
+	return hostKeyCallbackExpected(path, acceptNew, "")
+}
+
+// hostKeyCallbackExpected is used by interactive candidate enrollment. An
+// unknown key is written only when its independently verified fingerprint
+// exactly matches expectedFingerprint. Existing changed-key protection always
+// takes precedence.
+func hostKeyCallbackExpected(path string, acceptNew bool, expectedFingerprint string) (ssh.HostKeyCallback, error) {
 	if err := prepareKnownHosts(path); err != nil {
 		return nil, err
 	}
@@ -108,6 +114,10 @@ func hostKeyCallback(path string, acceptNew bool) (ssh.HostKeyCallback, error) {
 					return fmt.Errorf("%w: unknown host %q presented %s; verify the fingerprint, then enroll it with the password-free status command and --accept-new-host-key",
 						fvcore.ErrHostKeyMismatch, hostname, fingerprint)
 				}
+				if expectedFingerprint != "" && fingerprint != expectedFingerprint {
+					return fmt.Errorf("%w: host %q presented %s, not the independently verified %s; refusing enrollment",
+						fvcore.ErrHostKeyMismatch, hostname, fingerprint, expectedFingerprint)
+				}
 				if aerr := appendKnownHost(path, hostname, key); aerr != nil {
 					return fmt.Errorf("failed to record host key for %s: %w", hostname, aerr)
 				}
@@ -129,15 +139,7 @@ func hostKeyCallback(path string, acceptNew bool) (ssh.HostKeyCallback, error) {
 
 func prepareKnownHosts(path string) error {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	if info, err := os.Lstat(dir); err != nil {
-		return err
-	} else if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("known_hosts directory is not a secure directory: %s", dir)
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
+	if err := securefs.EnsurePrivateDirectory(dir, "known_hosts"); err != nil {
 		return err
 	}
 	if err := preparePrivateRegularFile(path, "known_hosts"); err != nil {

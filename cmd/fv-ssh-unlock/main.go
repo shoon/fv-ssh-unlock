@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -27,6 +28,7 @@ import (
 )
 
 var version = "dev"
+var dataDirOverride string
 
 const (
 	defaultSuccessMessage = "System successfully unlocked.\r\nYou may now use SSH to authenticate normally.\r\n\r\n"
@@ -60,7 +62,10 @@ Examples:
   fv-ssh-unlock unlock --all
   fv-ssh-unlock credentials providers
   fv-ssh-unlock discover
-  fv-ssh-unlock scan --cidr 192.168.1.0/24`
+  fv-ssh-unlock scan --cidr 192.168.1.0/24
+  fv-ssh-unlock daemon --once --identity ~/.ssh/id_ed25519
+  fv-ssh-unlock daemon --identity ~/.ssh/id_ed25519
+  fv-ssh-unlock tui`
 	addLongHelp = `Add a device to the local configuration file. Either the [name]
 argument or --host is required. If name is omitted, the host value is used.
 
@@ -117,6 +122,7 @@ func main() {
 	// We handle our own messaging; don't let Cobra print usage on every error.
 	rootCmd.SilenceUsage = true
 	rootCmd.SetContext(ctx)
+	rootCmd.PersistentFlags().StringVar(&dataDirOverride, "data-dir", "", "Configuration and state directory (or FV_SSH_UNLOCK_DATA_DIR; default ~/.fv-ssh-unlock)")
 
 	cfgCmd := &cobra.Command{
 		Use:   "config",
@@ -134,6 +140,7 @@ func main() {
 			requestedCredentialSource, _ := cmd.Flags().GetString("credential-source")
 			credentialFile, _ := cmd.Flags().GetString("credential-file")
 			allowUnsafeStorage, _ := cmd.Flags().GetBool("allow-unsafe-credential-storage")
+			autoUnlock, _ := cmd.Flags().GetBool("auto-unlock")
 
 			if user == "" {
 				return fmt.Errorf("user is required")
@@ -300,6 +307,7 @@ func main() {
 				CredentialSource: credentialSource,
 				CredentialRef:    credentialRef,
 				SuccessMessage:   successMsg,
+				AutoUnlock:       autoUnlock,
 			}
 			if err := config.ValidateDevice(d); err != nil {
 				if storedProvider != nil {
@@ -326,6 +334,7 @@ func main() {
 	addCmd.Flags().String("credential-source", "auto", "Credential source: auto, runtime, keyring, or file")
 	addCmd.Flags().String("credential-file", "", "Absolute path or systemd:<name> reference for an externally managed credential file")
 	addCmd.Flags().Bool("allow-unsafe-credential-storage", false, "Allow an unverified plaintext credential file for this command only")
+	addCmd.Flags().Bool("auto-unlock", false, "Allow the persistent daemon to unlock this device after conclusively detecting FileVault pre-boot")
 
 	removeCmd := &cobra.Command{
 		Use:   "remove [name...]",
@@ -433,13 +442,17 @@ func main() {
 			}
 			fmt.Println("Configured devices:")
 			tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
-			if _, err := fmt.Fprintln(tw, "NAME\tENDPOINT\tSSH USER\tCREDENTIAL"); err != nil {
+			if _, err := fmt.Fprintln(tw, "NAME\tENDPOINT\tSSH USER\tCREDENTIAL\tUNLOCK"); err != nil {
 				return err
 			}
 			for _, d := range devs {
-				if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
+				unlockMode := "manual"
+				if d.AutoUnlock {
+					unlockMode = "automatic"
+				}
+				if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
 					terminalSafeInline(d.Name), terminalSafeInline(deviceEndpoint(d)),
-					terminalSafeInline(d.User), credentialSourceLabel(d)); err != nil {
+					terminalSafeInline(d.User), credentialSourceLabel(d), unlockMode); err != nil {
 					return err
 				}
 			}
@@ -475,11 +488,12 @@ func main() {
 			fmt.Printf("Endpoint: %s\n", terminalSafeInline(deviceEndpoint(*d)))
 			fmt.Printf("SSH user: %s\n", terminalSafeInline(d.User))
 			fmt.Printf("Credential: %s\n", credentialSourceLabel(*d))
+			fmt.Printf("Automatic unlock: %t\n", d.AutoUnlock)
 			return nil
 		},
 	}
 
-	cfgCmd.AddCommand(addCmd, removeCmd, listCmd, showCmd)
+	cfgCmd.AddCommand(addCmd, removeCmd, listCmd, showCmd, newAutoUnlockConfigCommand(), newConfigExportCommand(), newConfigApplyCommand())
 
 	unlockCmd := &cobra.Command{
 		Use:   "unlock [name...]",
@@ -747,6 +761,7 @@ func main() {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			verbose, _ := cmd.Flags().GetBool("verbose")
 			insecure, _ := cmd.Flags().GetBool("insecure-host-key")
+			jsonOutput, _ := cmd.Flags().GetBool("json")
 			s, err := configStore()
 			if err != nil {
 				return err
@@ -766,7 +781,10 @@ func main() {
 				}
 			}
 			if len(targets) == 0 {
-				fmt.Println("No configured devices to check.")
+				if jsonOutput {
+					return writeStatusJSON(cmd.OutOrStdout(), []statusReport{})
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), "No configured devices to check.")
 				return nil
 			}
 
@@ -783,32 +801,63 @@ func main() {
 			ctx := cmd.Context()
 			var indeterminateDevices []string
 			var failedDevices []string
+			reports := make([]statusReport, 0, len(targets))
 			for _, d := range targets {
 				hostWithPort := deviceEndpoint(d)
 				st, _, perr := fvcore.CheckStatus(ctx, client, hostWithPort, d.User, 15*time.Second)
+				report := statusReport{Name: d.Name, Endpoint: hostWithPort, CheckedAt: time.Now().UTC()}
 				switch {
 				case st == fvcore.StatusLocked:
-					fmt.Printf("%-20s locked (FileVault pre-boot banner detected)\n", terminalSafeInline(d.Name))
+					report.State = "locked"
+					report.Evidence = "FileVault pre-boot banner detected"
+					if !jsonOutput {
+						fmt.Printf("%-20s locked (FileVault pre-boot banner detected)\n", terminalSafeInline(d.Name))
+					}
 				case st == fvcore.StatusUnlockedRecently:
 					// A completed SSH handshake (here, via public key) proves the
 					// machine has booted past the FileVault prompt.
-					fmt.Printf("%-20s booted (normal macOS SSH accepted a public key)\n", terminalSafeInline(d.Name))
+					report.State = "booted"
+					report.Evidence = "normal macOS SSH accepted a public key"
+					if !jsonOutput {
+						fmt.Printf("%-20s booted (normal macOS SSH accepted a public key)\n", terminalSafeInline(d.Name))
+					}
 				case errors.Is(perr, fvcore.ErrHostKeyMismatch):
-					return perr
+					report.State = "error"
+					report.Error = perr.Error()
+					if !jsonOutput {
+						fmt.Printf("%-20s error (%s)\n", terminalSafeInline(d.Name), terminalSafeInline(perr.Error()))
+					}
+					failedDevices = append(failedDevices, d.Name)
 				case errors.Is(perr, fvcore.ErrIndeterminate):
 					// A booted sshd prompts for a password just like the pre-boot
 					// server, so without a key or password we cannot say. Supply
 					// an SSH key (ssh-agent or --identity) to resolve these.
-					fmt.Printf("%-20s %s\n", terminalSafeInline(d.Name), indeterminateStatusText)
+					report.State = "indeterminate"
+					report.Evidence = "SSH reachable; no proof of FileVault pre-boot or booted macOS"
+					if !jsonOutput {
+						fmt.Printf("%-20s %s\n", terminalSafeInline(d.Name), indeterminateStatusText)
+					}
 					indeterminateDevices = append(indeterminateDevices, d.Name)
 				case perr != nil:
-					fmt.Printf("%-20s error (%s)\n", terminalSafeInline(d.Name), terminalSafeInline(perr.Error()))
+					report.State = "error"
+					report.Error = perr.Error()
+					if !jsonOutput {
+						fmt.Printf("%-20s error (%s)\n", terminalSafeInline(d.Name), terminalSafeInline(perr.Error()))
+					}
 					failedDevices = append(failedDevices, d.Name)
 				default:
-					fmt.Printf("%-20s %s\n", terminalSafeInline(d.Name), st)
+					report.State = st.String()
+					if !jsonOutput {
+						fmt.Printf("%-20s %s\n", terminalSafeInline(d.Name), st)
+					}
 				}
+				reports = append(reports, report)
 			}
-			if len(indeterminateDevices) > 0 {
+			if jsonOutput {
+				if err := writeStatusJSON(cmd.OutOrStdout(), reports); err != nil {
+					return err
+				}
+			} else if len(indeterminateDevices) > 0 {
 				fmt.Println("\nStatus never sends the FileVault password. A prompt-only pre-boot server and booted password-only SSH look identical.")
 				if len(client.Signers) == 0 {
 					fmt.Println("No usable SSH identity was found. Add one to ssh-agent or select an unencrypted key with --identity.")
@@ -830,8 +879,9 @@ func main() {
 	statusCmd.Flags().Bool("accept-new-host-key", false, "Trust and record an unknown host key after independently verifying its fingerprint")
 	statusCmd.Flags().StringSlice("identity", nil, "Private key used to prove normal macOS is booted (repeatable; defaults to standard ~/.ssh identities)")
 	statusCmd.Flags().Bool("require-known", false, "Exit unsuccessfully if any reachable device remains indeterminate")
+	statusCmd.Flags().Bool("json", false, "Emit a stable machine-readable JSON report")
 
-	rootCmd.AddCommand(cfgCmd, unlockCmd, statusCmd, newCredentialsCommand(), newDiscoverCommand(), newScanCommand())
+	rootCmd.AddCommand(cfgCmd, unlockCmd, statusCmd, newCredentialsCommand(), newDiscoverCommand(), newScanCommand(), newDaemonCommand(), newTUICommand(), newHealthcheckCommand())
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %s\n", terminalSafeInline(err.Error()))
@@ -839,7 +889,35 @@ func main() {
 	}
 }
 
-func configPath() (string, error) {
+type statusReport struct {
+	Name      string    `json:"name"`
+	Endpoint  string    `json:"endpoint"`
+	State     string    `json:"state"`
+	Evidence  string    `json:"evidence,omitempty"`
+	Error     string    `json:"error,omitempty"`
+	CheckedAt time.Time `json:"checked_at"`
+}
+
+func writeStatusJSON(output io.Writer, reports []statusReport) error {
+	return json.NewEncoder(output).Encode(struct {
+		SchemaVersion int            `json:"schema_version"`
+		Devices       []statusReport `json:"devices"`
+	}{SchemaVersion: 1, Devices: reports})
+}
+
+func appDataDir() (string, error) {
+	if dataDirOverride != "" {
+		if !filepath.IsAbs(dataDirOverride) {
+			return "", fmt.Errorf("--data-dir must be an absolute path")
+		}
+		return filepath.Clean(dataDirOverride), nil
+	}
+	if fromEnv := strings.TrimSpace(os.Getenv("FV_SSH_UNLOCK_DATA_DIR")); fromEnv != "" {
+		if !filepath.IsAbs(fromEnv) {
+			return "", fmt.Errorf("FV_SSH_UNLOCK_DATA_DIR must be an absolute path")
+		}
+		return filepath.Clean(fromEnv), nil
+	}
 	homedir, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("find home directory: %w", err)
@@ -847,7 +925,15 @@ func configPath() (string, error) {
 	if homedir == "" {
 		return "", fmt.Errorf("find home directory: empty path")
 	}
-	return filepath.Join(homedir, ".fv-ssh-unlock", "devices.json"), nil
+	return filepath.Join(homedir, ".fv-ssh-unlock"), nil
+}
+
+func configPath() (string, error) {
+	dir, err := appDataDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "devices.json"), nil
 }
 
 func readYes(r io.Reader) (bool, error) {

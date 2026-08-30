@@ -45,6 +45,9 @@ archives:
       - CONTRIBUTING.md
       - README.md
       - docs/*.md
+      - deploy/**/*
+      - contrib/ansible/**/*
+      - hack/verify-container-image.sh
       - tools/mock-fv-ssh-server/README.md
       - tools/mock-fv-ssh-server/Tahoe 26.0 FileVault SSH Real Output.txt
       - assets/fv-ssh-unlock.png

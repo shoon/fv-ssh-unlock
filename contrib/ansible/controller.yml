@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: Apache-2.0
+
+---
+- name: Install the FileVault availability controller
+  hosts: fv_controllers
+  become: true
+  roles:
+    - role: fv_ssh_unlock
+
+- name: Read controller state without changing it
+  hosts: fv_controllers
+  become: true
+  tasks:
+    - name: Request managed device state over the local Unix socket
+      ansible.builtin.uri:
+        url: http://localhost/v1/devices
+        unix_socket: /run/fv-ssh-unlock/control.sock
+        return_content: true
+      register: fv_device_state
+      changed_when: false
+
+    - name: Show non-secret managed state
+      ansible.builtin.debug:
+        var: fv_device_state.json
