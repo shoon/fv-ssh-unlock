@@ -897,7 +897,7 @@ func logCandidateResults(logger *slog.Logger, source string, results []candidate
 				"reason", "candidate inbox is full of operator-reviewed entries",
 			}
 			if observation := result.DroppedObservation; observation != nil {
-				attrs = append(attrs, "observed_at", observation.ObservedAt)
+				attrs = append(attrs, "observed_at", terminalSafeInline(observation.ObservedAt.UTC().Format(time.RFC3339Nano)))
 				if observation.Address != "" {
 					attrs = append(attrs, "endpoint", terminalSafeInline(net.JoinHostPort(observation.Address, fmt.Sprint(observation.Port))))
 				}
@@ -918,14 +918,14 @@ func logCandidateResults(logger *slog.Logger, source string, results []candidate
 				"candidate_id", terminalSafeInline(evictedID),
 				"replacement_candidate_id", terminalSafeInline(candidate.ID),
 				"source", terminalSafeInline(source),
-				"observed_at", candidate.LastSeen,
+				"observed_at", terminalSafeInline(candidate.LastSeen.UTC().Format(time.RFC3339Nano)),
 			)
 		}
 		attrs := []any{
 			"candidate_id", terminalSafeInline(candidate.ID),
 			"candidate_state", terminalSafeInline(string(candidate.State)),
 			"source", terminalSafeInline(source),
-			"observed_at", candidate.LastSeen,
+			"observed_at", terminalSafeInline(candidate.LastSeen.UTC().Format(time.RFC3339Nano)),
 		}
 		if len(candidate.Endpoints) > 0 {
 			attrs = append(attrs, "endpoint", terminalSafeInline(net.JoinHostPort(candidate.Endpoints[0].Address, fmt.Sprint(candidate.Endpoints[0].Port))))

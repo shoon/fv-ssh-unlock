@@ -261,6 +261,9 @@ func TestCandidateCapacityLogsDropsAndEvictions(t *testing.T) {
 		if entry["event"] != wantEvents[index] {
 			t.Fatalf("record %d event = %#v, want %q: %s", index, entry["event"], wantEvents[index], line)
 		}
+		if entry["observed_at"] != observedAt.Format(time.RFC3339Nano) {
+			t.Fatalf("record %d observed_at = %#v, want %q: %s", index, entry["observed_at"], observedAt.Format(time.RFC3339Nano), line)
+		}
 	}
 	var dropped map[string]any
 	if err := json.Unmarshal(lines[2], &dropped); err != nil {
