@@ -157,14 +157,14 @@ func TestAnalyzePromptEofIsNotSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	go func() {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
 				return
 			}
-			conn.Close()
+			_ = conn.Close()
 		}
 	}()
 
@@ -216,7 +216,7 @@ func TestAnalyzePromptConnectionRefused(t *testing.T) {
 		t.Fatalf("listen: %v", err)
 	}
 	addr := ln.Addr().String()
-	ln.Close()
+	_ = ln.Close()
 
 	c := newClient(ssh.FixedHostKey(mustHostKey(t)))
 	_, _, err = c.AnalyzePrompt(context.Background(), addr, "user", "pw", "")

@@ -130,6 +130,7 @@ func logSafeInline(s string) string {
 func (r *RealSSHClient) hostKeyCallback() ssh.HostKeyCallback {
 	switch {
 	case r.InsecureIgnoreHostKey:
+		// #nosec G106 -- reachable only through the explicit --insecure-host-key opt-in, which prints a man-in-the-middle warning when set.
 		return ssh.InsecureIgnoreHostKey()
 	case r.HostKeyCallback != nil:
 		return r.HostKeyCallback
@@ -327,9 +328,9 @@ func (r *RealSSHClient) AnalyzePrompt(ctx context.Context, host, user, password,
 	// A completed handshake means we reached a fully booted sshd. The machine
 	// is already unlocked. (The FileVault pre-boot server never completes the
 	// handshake; it fails auth after emitting the success banner.)
-	defer sshConn.Close()
+	defer func() { _ = sshConn.Close() }()
 	client := ssh.NewClient(sshConn, chans, reqs)
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	if successAfterAuth {
 		return StatusUnlocked, out, nil
@@ -350,7 +351,7 @@ func (r *RealSSHClient) ProbeStatus(ctx context.Context, host, user string) (Dev
 	promptedForPassword, _, _ := trace.state()
 	if err != nil {
 		if isHostKeyError(err) {
-			return StatusUnknown, out, fmt.Errorf("%w for %s: %v", ErrHostKeyMismatch, host, err)
+			return StatusUnknown, out, fmt.Errorf("%w for %s: %w", ErrHostKeyMismatch, host, err)
 		}
 		// We aborted keyboard-interactive on purpose (errStatusProbe). Only the
 		// locked banner proves the pre-boot state: a fully booted sshd also
@@ -373,7 +374,7 @@ func (r *RealSSHClient) ProbeStatus(ctx context.Context, host, user string) (Dev
 	// Handshake completed without a password (a booted host with an open auth
 	// method), so treat it as already unlocked.
 	client := ssh.NewClient(sshConn, chans, reqs)
-	client.Close()
+	_ = client.Close()
 	return StatusUnlockedRecently, out, nil
 }
 
@@ -437,7 +438,7 @@ func (r *RealSSHClient) handshake(ctx context.Context, host string, cfg *ssh.Cli
 // err.Error().
 func (r *RealSSHClient) classifyHandshakeErr(host, out string, promptedForPassword, passwordAnswered, successAfterAuth, transportTransitionObserved bool, err error) (DeviceStatus, string, error) {
 	if isHostKeyError(err) {
-		return StatusUnknown, out, fmt.Errorf("%w for %s: %v", ErrHostKeyMismatch, host, err)
+		return StatusUnknown, out, fmt.Errorf("%w for %s: %w", ErrHostKeyMismatch, host, err)
 	}
 	// The success banner is the authoritative positive signal, even though the
 	// server then fails auth, disconnects, or keeps the connection open. It wins

@@ -1,11 +1,49 @@
+# golangci-lint v2 configuration.
+#
+# `default: standard` enables errcheck, govet, ineffassign, staticcheck and
+# unused — the same set the previous v1 config listed explicitly — and the
+# `enable` block adds the extras on top.
+version: "2"
+
 run:
   timeout: 5m
+  # Lint the keyring-tagged sources too; that variant ships in the Linux,
+  # macOS and Windows release binaries but is invisible to a default build.
+  build-tags:
+    - keyring
 
 linters:
+  default: standard
   enable:
-    - govet
-    - errcheck
-    - staticcheck
-    - ineffassign
-    - unused
     - misspell
+    # Security-focused static analysis. This project handles credentials,
+    # host-key trust and file permissions, so gosec's rule set is squarely
+    # on-topic rather than incidental.
+    - gosec
+    # Flags errors compared with == or type-asserted instead of errors.Is /
+    # errors.As, and %v-formatted errors that should be %w. The credential
+    # paths classify failures by error identity, so unwrapped comparisons
+    # are a correctness risk here, not a style nit.
+    - errorlint
+  settings:
+    errcheck:
+      # Terminal and diagnostic output is best-effort by design; a failed
+      # write to stdout/stderr must never abort a monitoring or unlock
+      # operation. Writes that matter (state files, known_hosts) go through
+      # securefs and check every error explicitly.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+  exclusions:
+    generated: lax
+    rules:
+      # Test files legitimately use fixed test credentials, permissive temp
+      # dir modes and math/rand; gosec flags all three.
+      - path: _test\.go$
+        linters:
+          - gosec
+
+formatters:
+  enable:
+    - gofmt

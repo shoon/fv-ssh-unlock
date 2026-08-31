@@ -161,12 +161,12 @@ func startTestServer(t *testing.T, cfg testServerConfig) *testServer {
 				return
 			}
 			go func(c net.Conn) {
-				defer c.Close()
+				defer func() { _ = c.Close() }()
 				sshConn, chans, reqs, err := ssh.NewServerConn(c, sc)
 				if err != nil {
 					return // expected in the locked state
 				}
-				defer sshConn.Close()
+				defer func() { _ = sshConn.Close() }()
 				go ssh.DiscardRequests(reqs)
 				for ch := range chans {
 					_ = ch.Reject(ssh.Prohibited, "no shell provided by test server")
@@ -174,7 +174,7 @@ func startTestServer(t *testing.T, cfg testServerConfig) *testServer {
 			}(conn)
 		}
 	}()
-	t.Cleanup(func() { ln.Close() })
+	t.Cleanup(func() { _ = ln.Close() })
 	return ts
 }
 
