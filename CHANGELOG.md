@@ -18,6 +18,8 @@ All notable changes to this project are documented here.
   release-built DEB and RPM packages for Linux AMD64 and ARM64.
 - Package CI that builds, inspects, installs, executes, and removes native
   packages before release.
+- Container author and GitHub Sponsors metadata exposed as OCI labels without
+  adding files or packages to the scratch image.
 
 ### Changed
 

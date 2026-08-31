@@ -40,6 +40,12 @@ package manager, libc, CA bundle, or OS packages are present. It runs as
 numeric UID/GID `65532`, defaults to the daemon command, and uses the binary's
 internal health check rather than `curl`.
 
+The current Dockerfile records its author and the project's GitHub Sponsors
+page as OCI labels. This is manifest metadata and does not add files, packages,
+or software components to the scratch filesystem. Images published before
+this metadata was added do not contain these labels; the Docker Hub repository
+overview still links to the same sponsorship page.
+
 The image deliberately omits the desktop keyring build tag and its D-Bus
 integration. Use a Linux service secret under `/run/secrets`; use the native
 keyring-enabled binary for macOS or Windows credential-store integration.
@@ -124,6 +130,10 @@ Maintainers and source-build users can run the same runtime-contract verifier:
 docker build --tag fv-ssh-unlock:test .
 ./hack/verify-container-image.sh fv-ssh-unlock:test
 docker image history fv-ssh-unlock:test
+docker image inspect fv-ssh-unlock:test --format \
+  '{{index .Config.Labels "org.opencontainers.image.authors"}}'
+docker image inspect fv-ssh-unlock:test --format \
+  '{{index .Config.Labels "io.github.shoon.sponsors"}}'
 ```
 
 The verifier asserts the non-root identity, single filesystem layer,
