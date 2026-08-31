@@ -316,10 +316,10 @@ for the complete file list.
 ## Repository security controls
 
 The public GitHub repository uses secret scanning with push protection,
-Dependabot security updates, and CodeQL analysis for Go and GitHub Actions. CI
-and release workflows use read-only permissions by default and grant write
-access only to the tagged release job. Published releases include checksums,
-keyless Sigstore verification material, and SPDX SBOMs.
+Dependabot security updates, and GitHub CodeQL default setup for Go and GitHub
+Actions. CI and release workflows use read-only permissions by default and
+grant write access only to the tagged release job. Published releases include
+checksums, keyless Sigstore verification material, and SPDX SBOMs.
 
 ---
 

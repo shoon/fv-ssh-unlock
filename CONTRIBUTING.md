@@ -175,9 +175,9 @@ and inspects both DEB/RPM architectures before a release tag is accepted.
 CI additionally runs `golangci-lint` (including `gosec` and `errorlint`) over
 the default and keyring build tags, exercises the keyring backend on Linux,
 macOS, and Windows, enforces aggregate Linux statement-coverage floors of 70%
-for both the main module and mock server, and analyzes Go and workflow
-sources with CodeQL. Pull requests also run dependency review. Run the linter
-locally with:
+for both the main module and mock server. GitHub CodeQL default setup analyzes
+Go and workflow sources, and pull requests also run dependency review. Run the
+linter locally with:
 
 ```bash
 go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2 run

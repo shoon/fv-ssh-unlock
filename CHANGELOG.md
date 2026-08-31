@@ -12,9 +12,10 @@ All notable changes to this project are documented here.
   packages before release.
 - DEB and RPM packages now include the hardened systemd unit with its command
   path adjusted to the packaged `/usr/bin/fv-ssh-unlock` binary.
-- CI now runs CodeQL for Go and GitHub Actions, dependency review, golangci-lint
-  across the default and keyring variants, and a Linux Secret Service keyring
-  round trip in addition to the macOS and Windows keyring tests.
+- GitHub CodeQL default setup analyzes Go and GitHub Actions. CI now runs
+  dependency review, golangci-lint across the default and keyring variants,
+  and a Linux Secret Service keyring round trip in addition to the macOS and
+  Windows keyring tests.
 - The local API now reports configured probe/unlock budgets and process-lifetime
   candidate drop/eviction counters; structured logs expose the corresponding
   `candidate.dropped` and `candidate.evicted` capacity events.
