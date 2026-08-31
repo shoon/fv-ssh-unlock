@@ -24,6 +24,7 @@ import (
 	"golang.org/x/crypto/ssh/knownhosts"
 
 	"github.com/shoon/fv-ssh-unlock/internal/config"
+	"github.com/shoon/fv-ssh-unlock/internal/securefs"
 	"github.com/shoon/fv-ssh-unlock/pkg/fvcore"
 )
 
@@ -245,7 +246,7 @@ func probeScanTarget(parent context.Context, address netip.Addr, port int, user 
 	if err != nil {
 		return finding, false
 	}
-	defer base.Close()
+	defer func() { _ = base.Close() }()
 	_ = base.SetDeadline(time.Now().Add(timeout))
 
 	captured := &identificationCaptureConn{Conn: base}
@@ -311,8 +312,8 @@ func (t *scanAuthTrace) add(value string) {
 	if value == "" {
 		return
 	}
-	t.WriteString(value)
-	t.WriteByte('\n')
+	_, _ = t.WriteString(value)
+	_ = t.WriteByte('\n')
 }
 
 // identificationCaptureConn records the plaintext SSH identification line
@@ -414,14 +415,14 @@ func loadPinnedTargetNames() (map[string][]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	file, err := openStableRegularFileReadOnly(path)
+	file, err := securefs.OpenStable(path, "known_hosts")
 	if os.IsNotExist(err) {
 		return map[string][]string{}, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	info, err := file.Stat()
 	if err != nil {
 		return nil, err
@@ -437,29 +438,6 @@ func loadPinnedTargetNames() (map[string][]string, error) {
 		return nil, fmt.Errorf("known_hosts exceeds %d bytes", maxKnownHostsSize)
 	}
 	return matchPinnedTargetNames(data, devices), nil
-}
-
-func openStableRegularFileReadOnly(path string) (*os.File, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	fail := func(err error) (*os.File, error) {
-		_ = file.Close()
-		return nil, err
-	}
-	openedInfo, err := file.Stat()
-	if err != nil {
-		return fail(err)
-	}
-	pathInfo, err := os.Lstat(path)
-	if err != nil {
-		return fail(err)
-	}
-	if !openedInfo.Mode().IsRegular() || !pathInfo.Mode().IsRegular() || pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(openedInfo, pathInfo) {
-		return fail(fmt.Errorf("not a stable regular file: %s", path))
-	}
-	return file, nil
 }
 
 func matchPinnedTargetNames(data []byte, devices []config.Device) map[string][]string {

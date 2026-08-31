@@ -54,7 +54,7 @@ func TestHostKeyUnknownFailsClosed(t *testing.T) {
 }
 
 func TestNewSSHClientRejectsConflictingHostKeyFlags(t *testing.T) {
-	if _, err := newSSHClient(false, true, true, nil); err == nil {
+	if _, err := newSSHClient(false, true, true, nil, 0); err == nil {
 		t.Fatal("expected conflicting host-key flags to be rejected")
 	}
 }
@@ -217,4 +217,133 @@ func TestHostKeyStoreRejectsSymlink(t *testing.T) {
 	if _, err := hostKeyCallback(path, false); err == nil {
 		t.Fatal("expected symlinked known_hosts to be rejected")
 	}
+}
+
+func TestDeferredHostKeyIsNotPinnedUntilCommitted(t *testing.T) {
+	path := privateKnownHostsTestPath(t)
+	key := testPublicKey(t)
+	var pending pendingHostKey
+	callback, err := hostKeyCallbackFunc(path, true, ssh.FingerprintSHA256(key), func(observed pendingHostKey) error {
+		pending = observed
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := callback("host.example:22", &net.TCPAddr{}, key); err != nil {
+		t.Fatalf("verified key was rejected: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) != 0 {
+		t.Fatalf("verification recorded the key before it was committed: %q", data)
+	}
+	if pending.key == nil {
+		t.Fatal("verification did not hand back the observed key")
+	}
+
+	if err := commitPendingHostKey(path, pending); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	data, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) == 0 {
+		t.Fatal("commit did not pin the key")
+	}
+	pinned, err := hostKeyCallback(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pinned("host.example:22", &net.TCPAddr{}, key); err != nil {
+		t.Fatalf("committed key is not pinned: %v", err)
+	}
+	// Committing again must not duplicate the entry.
+	if err := commitPendingHostKey(path, pending); err != nil {
+		t.Fatalf("repeat commit: %v", err)
+	}
+	if lines := strings.Count(strings.TrimSpace(string(mustReadFile(t, path))), "\n") + 1; lines != 1 {
+		t.Fatalf("expected one pinned key, got %d lines", lines)
+	}
+
+	if err := removeKnownHost(path, pending.hostname, pending.key); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if got := strings.TrimSpace(string(mustReadFile(t, path))); got != "" {
+		t.Fatalf("rollback left %q behind", got)
+	}
+	// Removing an entry that is not there is not an error.
+	if err := removeKnownHost(path, pending.hostname, pending.key); err != nil {
+		t.Fatalf("repeat remove: %v", err)
+	}
+}
+
+func TestCommitPendingHostKeyFailsClosedOnAConflictingEntry(t *testing.T) {
+	path := privateKnownHostsTestPath(t)
+	verified := testPublicKey(t)
+	var pending pendingHostKey
+	callback, err := hostKeyCallbackFunc(path, true, ssh.FingerprintSHA256(verified), func(observed pendingHostKey) error {
+		pending = observed
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := callback("host.example:22", &net.TCPAddr{}, verified); err != nil {
+		t.Fatal(err)
+	}
+
+	// Another writer pins a different key for the same host before the
+	// enrollment commits.
+	if err := appendKnownHost(path, "host.example:22", testPublicKey(t)); err != nil {
+		t.Fatal(err)
+	}
+	err = commitPendingHostKey(path, pending)
+	if !errors.Is(err, fvcore.ErrHostKeyMismatch) {
+		t.Fatalf("conflicting commit = %v, want a host-key mismatch", err)
+	}
+	if lines := strings.Count(strings.TrimSpace(string(mustReadFile(t, path))), "\n") + 1; lines != 1 {
+		t.Fatalf("refused commit changed known_hosts: %q", mustReadFile(t, path))
+	}
+}
+
+func TestRemoveKnownHostLeavesUnrelatedEntriesAlone(t *testing.T) {
+	path := privateKnownHostsTestPath(t)
+	if err := prepareKnownHosts(path); err != nil {
+		t.Fatal(err)
+	}
+	mine := testPublicKey(t)
+	theirs := testPublicKey(t)
+	if err := appendKnownHost(path, "other.example:22", theirs); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendKnownHost(path, "host.example:22", mine); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeKnownHost(path, "host.example:22", mine); err != nil {
+		t.Fatal(err)
+	}
+	remaining := strings.TrimSpace(string(mustReadFile(t, path)))
+	if strings.Count(remaining, "\n") != 0 {
+		t.Fatalf("expected exactly one remaining entry: %q", remaining)
+	}
+	callback, err := hostKeyCallback(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := callback("other.example:22", &net.TCPAddr{}, theirs); err != nil {
+		t.Fatalf("unrelated entry was disturbed: %v", err)
+	}
+}
+
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }

@@ -338,7 +338,7 @@ func unescapeDNS(s string) string {
 		if i+3 < len(s) && isDigit(s[i+1]) && isDigit(s[i+2]) && isDigit(s[i+3]) {
 			n := int(s[i+1]-'0')*100 + int(s[i+2]-'0')*10 + int(s[i+3]-'0')
 			if n <= 255 {
-				b.WriteByte(byte(n))
+				b.WriteByte(byte(n)) // #nosec G115 -- guarded to <= 255 above
 				i += 4
 				continue
 			}
@@ -352,24 +352,35 @@ func unescapeDNS(s string) string {
 
 func isDigit(c byte) bool { return c >= '0' && c <= '9' }
 
-// printDevices renders the results as a stable, sorted table.
-func printDevices(found map[string]*device, rounds int) {
-	byName := make(map[string]*device, len(found))
-	for _, d := range found {
-		label := d.instance
-		if label == "" {
-			label = d.hostname
-		}
-		byName[label] = d
+// deviceLabel is the display name for a discovered host: its Bonjour instance
+// name, falling back to the advertised hostname.
+func deviceLabel(d *device) string {
+	if d.instance != "" {
+		return d.instance
 	}
-	names := make([]string, 0, len(byName))
-	for n := range byName {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	found = byName
+	return d.hostname
+}
 
-	if len(names) == 0 {
+// printDevices renders the results as a stable, sorted table.
+//
+// Rows are keyed by the accumulation key, which is the host's unique identity.
+// The display label is not unique: two Macs can advertise the same Bonjour
+// instance name, and keying the table by the label would silently drop one of
+// them from the output.
+func printDevices(found map[string]*device, rounds int) {
+	keys := make([]string, 0, len(found))
+	for key := range found {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		left, right := deviceLabel(found[keys[i]]), deviceLabel(found[keys[j]])
+		if left != right {
+			return left < right
+		}
+		return keys[i] < keys[j]
+	})
+
+	if len(keys) == 0 {
 		fmt.Printf("\nNo Bonjour SSH services found after %d browse round(s).\n", rounds)
 		fmt.Println("Services normally appear while macOS is booted with Remote Login enabled.")
 		fmt.Println("FileVault pre-boot may still answer TCP/22 without advertising Bonjour.")
@@ -379,16 +390,16 @@ func printDevices(found map[string]*device, rounds int) {
 
 	// Size the columns to the content so long Bonjour names stay readable.
 	nameW, hostW := len("NAME"), len("HOSTNAME")
-	for _, n := range names {
-		nameW = max(nameW, len(terminalSafeInline(n)))
-		hostW = max(hostW, len(terminalSafeInline(found[n].hostname)))
+	for _, key := range keys {
+		nameW = max(nameW, len(terminalSafeInline(deviceLabel(found[key]))))
+		hostW = max(hostW, len(terminalSafeInline(found[key].hostname)))
 	}
 
 	fmt.Println()
 	fmt.Printf("%-*s  %-*s  %-5s  %s\n", nameW, "NAME", hostW, "HOSTNAME", "PORT", "ADDRESSES")
 	fmt.Printf("%s\n", strings.Repeat("-", nameW+hostW+7+20))
-	for _, n := range names {
-		d := found[n]
+	for _, key := range keys {
+		d := found[key]
 		addrs := make([]string, 0, len(d.addrs))
 		for a := range d.addrs {
 			addrs = append(addrs, a)
@@ -398,10 +409,10 @@ func printDevices(found map[string]*device, rounds int) {
 		if d.port != 0 {
 			port = fmt.Sprintf("%d", d.port)
 		}
-		fmt.Printf("%-*s  %-*s  %-5s  %s\n", nameW, terminalSafeInline(n), hostW, terminalSafeInline(d.hostname), port, strings.Join(addrs, ", "))
+		fmt.Printf("%-*s  %-*s  %-5s  %s\n", nameW, terminalSafeInline(deviceLabel(d)), hostW, terminalSafeInline(d.hostname), port, strings.Join(addrs, ", "))
 	}
 
-	fmt.Printf("\nDiscovery complete: %d SSH service host(s) over %d browse round(s).\n", len(names), rounds)
+	fmt.Printf("\nDiscovery complete: %d SSH service host(s) over %d browse round(s).\n", len(keys), rounds)
 	fmt.Println("These are candidates only; discovery does not test SSH or FileVault readiness.")
 	fmt.Println("Record a stable address before restart; a DHCP reservation is preferred.")
 	fmt.Println("\nTo add a discovered device to your configuration, use:")

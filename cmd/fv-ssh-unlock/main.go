@@ -144,7 +144,7 @@ func main() {
 			autoUnlock, _ := cmd.Flags().GetBool("auto-unlock")
 
 			if user == "" {
-				return fmt.Errorf("user is required")
+				return fmt.Errorf("--user flag is required")
 			}
 			if host == "" {
 				return fmt.Errorf("--host flag is required")
@@ -542,7 +542,7 @@ func main() {
 			if noVerify, _ := cmd.Flags().GetBool("no-verify"); noVerify {
 				verifyWindow = 0
 			}
-			client, err := newSSHClient(verbose, insecure, false, identityFiles)
+			client, err := newSSHClient(verbose, insecure, false, identityFiles, defaultDialTimeout)
 			if err != nil {
 				return err
 			}
@@ -594,137 +594,25 @@ func main() {
 				}
 				deviceStore = &staticStore{pw: password}
 
-				successMsg := device.SuccessMessage
-				if successMsg == "" {
-					successMsg = defaultSuccessMessage
+				result, err := unlockDeviceWithRetry(ctx, os.Stdout, client, deviceStore, device, credID, unlockRetryOptions{
+					maxAttempts: maxAttempts, retryDelay: retryDelay, verifyWindow: verifyWindow, verbose: verbose,
+				})
+				if err != nil {
+					return err
 				}
-
-				attempts := 0
-				previousUnacknowledgedAttempt := false
-				for {
-					attempts++
-					hostWithPort := deviceEndpoint(device)
-					if verbose {
-						fmt.Printf("[verbose] Attempt %d/%d: Unlocking %s@%s, successMsg=%q\n", attempts, maxAttempts, terminalSafeInline(device.User), terminalSafeInline(hostWithPort), terminalSafeInline(successMsg))
-					} else {
-						fmt.Printf("Attempt %d/%d: Unlocking %s@%s\n", attempts, maxAttempts, terminalSafeInline(device.User), terminalSafeInline(hostWithPort))
+				switch result.outcome {
+				case unlockOutcomeUnlocked:
+					atLeastOneSuccess = true
+				case unlockOutcomeIncorrectPassword:
+					if len(devicesToUnlock) == 1 {
+						return fmt.Errorf("failed to unlock device '%s': incorrect password", device.Name)
 					}
-
-					fvDevice := fvcore.Device{
-						Host: hostWithPort,
-						User: device.User,
-						Cred: credID,
-						Port: device.Port,
+					failedDevices = append(failedDevices, device.Name)
+				default:
+					if result.lastError != nil && len(devicesToUnlock) == 1 {
+						return result.lastError
 					}
-					results := fvcore.UnlockMany(ctx, client, deviceStore, []fvcore.Device{fvDevice}, successMsg, 20*time.Second, 1)
-					res := results[0]
-
-					if verbose {
-						fmt.Printf("[verbose] banner:\n%s\n", terminalSafeMultiline(res.Output))
-						if res.Error != nil {
-							fmt.Printf("[verbose] Error: %s\n", terminalSafeInline(res.Error.Error()))
-						}
-					}
-
-					switch res.Status {
-					case fvcore.StatusUnlocked:
-						fmt.Printf("SUCCESS: %s accepted the unlock password.\n", terminalSafeInline(device.Name))
-						atLeastOneSuccess = true
-						if verifyWindow > 0 {
-							fmt.Printf("Verifying %s finished booting (up to %v)...\n", terminalSafeInline(device.Name), verifyWindow)
-							opts := fvcore.DefaultVerifyOptions()
-							opts.Window = verifyWindow
-							ok, verr := fvcore.VerifyUnlock(ctx, client, fvDevice, opts)
-							switch {
-							case errors.Is(verr, fvcore.ErrHostKeyMismatch):
-								return verr
-							case errors.Is(verr, fvcore.ErrIndeterminate):
-								fmt.Printf("WARNING: %s accepted the unlock, but no public key proved that normal macOS returned; run status later with ssh-agent or --identity.\n", terminalSafeInline(device.Name))
-							case verr != nil:
-								fmt.Printf("WARNING: could not verify %s: %s\n", terminalSafeInline(device.Name), terminalSafeInline(verr.Error()))
-							case ok:
-								fmt.Printf("VERIFIED: %s is booted and reachable over SSH.\n", terminalSafeInline(device.Name))
-							default:
-								fmt.Printf("NOTE: %s accepted the unlock but has not come back within %v; it may still be booting.\n", terminalSafeInline(device.Name), verifyWindow)
-							}
-						}
-					case fvcore.StatusUnlockedRecently:
-						if previousUnacknowledgedAttempt {
-							fmt.Printf("VERIFIED: %s is booted after an earlier unlock attempt; the pre-boot success acknowledgement was not observed.\n", terminalSafeInline(device.Name))
-						} else {
-							fmt.Printf("INFO: %s is already booted; normal macOS SSH accepted a public key. No unlock was needed.\n", terminalSafeInline(device.Name))
-						}
-						atLeastOneSuccess = true
-					case fvcore.StatusLocked:
-						// Wrong password; retrying will not help.
-						fmt.Printf("FAILED: %s is still locked (incorrect password).\n", terminalSafeInline(device.Name))
-						if len(devicesToUnlock) == 1 {
-							return fmt.Errorf("failed to unlock device '%s': incorrect password", device.Name)
-						}
-						failedDevices = append(failedDevices, device.Name)
-					default:
-						if errors.Is(res.Error, fvcore.ErrHostKeyMismatch) {
-							fmt.Printf("SECURITY ERROR: refusing %s: %s\n", terminalSafeInline(device.Name), terminalSafeInline(res.Error.Error()))
-							return res.Error
-						}
-						if errors.Is(res.Error, fvcore.ErrUnlockOutcomeUnknown) {
-							previousUnacknowledgedAttempt = true
-							if verifyWindow > 0 {
-								fmt.Printf("The password was submitted, but %s did not acknowledge the outcome. Checking for normal macOS without sending the password again (up to %v)...\n", terminalSafeInline(device.Name), verifyWindow)
-								opts := fvcore.DefaultVerifyOptions()
-								opts.Grace = 0
-								opts.Window = verifyWindow
-								opts.Interval = 2 * time.Second
-								opts.AttemptTimeout = 5 * time.Second
-								if verifyWindow < opts.AttemptTimeout {
-									opts.AttemptTimeout = verifyWindow
-								}
-								ok, verr := fvcore.VerifyUnlock(ctx, client, fvDevice, opts)
-								switch {
-								case errors.Is(verr, fvcore.ErrHostKeyMismatch):
-									return verr
-								case ok:
-									fmt.Printf("VERIFIED: %s is booted and reachable over SSH after the unlock attempt; the pre-boot success acknowledgement was not observed.\n", terminalSafeInline(device.Name))
-									atLeastOneSuccess = true
-									break
-								case errors.Is(verr, fvcore.ErrIndeterminate):
-									fmt.Printf("NOTE: %s is still reachable but its state cannot yet be proved without a public key; continuing the configured retry policy.\n", terminalSafeInline(device.Name))
-								case verr != nil:
-									if errors.Is(verr, context.Canceled) {
-										return verr
-									}
-									fmt.Printf("NOTE: boot verification after the unacknowledged attempt failed: %s\n", terminalSafeInline(verr.Error()))
-								default:
-									fmt.Printf("NOTE: %s did not return to normal SSH within %v; continuing the configured retry policy.\n", terminalSafeInline(device.Name), verifyWindow)
-								}
-								if ok {
-									break
-								}
-							}
-						}
-						// StatusUnknown: transient (network not up yet, dial
-						// error). These are the cases worth retrying.
-						if res.Error != nil {
-							fmt.Printf("Attempt %d/%d failed: %s\n", attempts, maxAttempts, terminalSafeInline(res.Error.Error()))
-						} else {
-							fmt.Printf("Attempt %d/%d failed: device state unknown\n", attempts, maxAttempts)
-						}
-						if attempts < maxAttempts {
-							fmt.Printf("Waiting %v before next attempt...\n", retryDelay)
-							select {
-							case <-ctx.Done():
-								return ctx.Err()
-							case <-time.After(retryDelay):
-							}
-							continue
-						}
-						fmt.Printf("Error: reached max retry attempts for device '%s'. Giving up.\n", terminalSafeInline(device.Name))
-						if res.Error != nil && len(devicesToUnlock) == 1 {
-							return res.Error
-						}
-						failedDevices = append(failedDevices, device.Name)
-					}
-					break
+					failedDevices = append(failedDevices, device.Name)
 				}
 			}
 
@@ -791,7 +679,7 @@ func main() {
 			}
 			requireKnown, _ := cmd.Flags().GetBool("require-known")
 			identityFiles, _ := cmd.Flags().GetStringSlice("identity")
-			client, err := newSSHClient(verbose, insecure, acceptNew, identityFiles)
+			client, err := newSSHClient(verbose, insecure, acceptNew, identityFiles, defaultDialTimeout)
 			if err != nil {
 				return err
 			}
@@ -1088,4 +976,185 @@ func (s *staticStore) Get(name string) (string, error) {
 		return "", fmt.Errorf("no password available")
 	}
 	return s.pw, nil
+}
+
+// unlockOutcome is the terminal state of the per-device unlock retry state
+// machine. Wrong-password and gave-up are kept apart because the caller reports
+// them differently, and only the latter carries a transport error worth
+// surfacing.
+type unlockOutcome int
+
+const (
+	// unlockOutcomeUnlocked means the device is unlocked, or was independently
+	// proved already booted so no unlock was needed.
+	unlockOutcomeUnlocked unlockOutcome = iota
+	// unlockOutcomeIncorrectPassword means FileVault rejected the credential.
+	// Retrying cannot help.
+	unlockOutcomeIncorrectPassword
+	// unlockOutcomeExhausted means every attempt ended transient or
+	// indeterminate. This is the fail-closed outcome: the device is not known to
+	// be unlocked.
+	unlockOutcomeExhausted
+)
+
+// unlockRetryOptions is the retry policy for one device.
+type unlockRetryOptions struct {
+	maxAttempts  int
+	retryDelay   time.Duration
+	verifyWindow time.Duration
+	verbose      bool
+}
+
+// unlockAttemptResult reports how the retry state machine ended.
+type unlockAttemptResult struct {
+	outcome unlockOutcome
+	// lastError is the transport error of the final attempt when outcome is
+	// unlockOutcomeExhausted. The caller decides whether to surface it.
+	lastError error
+}
+
+// unlockRetryClient is the SSH surface the retry state machine needs: the
+// password-carrying unlock path and the password-free verification probe. Real
+// clients satisfy both; tests substitute a fake.
+type unlockRetryClient interface {
+	fvcore.SSHClient
+	fvcore.StatusChecker
+}
+
+// unlockDeviceWithRetry runs the unlock retry state machine for a single
+// device.
+//
+// A non-nil error is fatal for the whole command and must be returned to the
+// user unchanged: a host-key mismatch (at any point, including during
+// verification), or a cancelled context.
+//
+// The password is submitted at most once per attempt and never re-sent to
+// resolve an ambiguous outcome. When a submission is not acknowledged, the
+// attempt is credited only if a password-free probe independently proves the
+// device booted; otherwise the state machine keeps failing closed and, if
+// attempts remain, retries under the configured policy.
+func unlockDeviceWithRetry(ctx context.Context, out io.Writer, client unlockRetryClient, store fvcore.CredentialStore, device config.Device, credID string, opts unlockRetryOptions) (unlockAttemptResult, error) {
+	successMsg := device.SuccessMessage
+	if successMsg == "" {
+		successMsg = defaultSuccessMessage
+	}
+
+	attempts := 0
+	previousUnacknowledgedAttempt := false
+	for {
+		attempts++
+		hostWithPort := deviceEndpoint(device)
+		if opts.verbose {
+			fmt.Fprintf(out, "[verbose] Attempt %d/%d: Unlocking %s@%s, successMsg=%q\n", attempts, opts.maxAttempts, terminalSafeInline(device.User), terminalSafeInline(hostWithPort), terminalSafeInline(successMsg))
+		} else {
+			fmt.Fprintf(out, "Attempt %d/%d: Unlocking %s@%s\n", attempts, opts.maxAttempts, terminalSafeInline(device.User), terminalSafeInline(hostWithPort))
+		}
+
+		fvDevice := fvcore.Device{
+			Host: hostWithPort,
+			User: device.User,
+			Cred: credID,
+			Port: device.Port,
+		}
+		results := fvcore.UnlockMany(ctx, client, store, []fvcore.Device{fvDevice}, successMsg, 20*time.Second, 1)
+		res := results[0]
+
+		if opts.verbose {
+			fmt.Fprintf(out, "[verbose] banner:\n%s\n", terminalSafeMultiline(res.Output))
+			if res.Error != nil {
+				fmt.Fprintf(out, "[verbose] Error: %s\n", terminalSafeInline(res.Error.Error()))
+			}
+		}
+
+		switch res.Status {
+		case fvcore.StatusUnlocked:
+			fmt.Fprintf(out, "SUCCESS: %s accepted the unlock password.\n", terminalSafeInline(device.Name))
+			if opts.verifyWindow > 0 {
+				fmt.Fprintf(out, "Verifying %s finished booting (up to %v)...\n", terminalSafeInline(device.Name), opts.verifyWindow)
+				verifyOpts := fvcore.DefaultVerifyOptions()
+				verifyOpts.Window = opts.verifyWindow
+				ok, verr := fvcore.VerifyUnlock(ctx, client, fvDevice, verifyOpts)
+				switch {
+				case errors.Is(verr, fvcore.ErrHostKeyMismatch):
+					return unlockAttemptResult{}, verr
+				case errors.Is(verr, fvcore.ErrIndeterminate):
+					fmt.Fprintf(out, "WARNING: %s accepted the unlock, but no public key proved that normal macOS returned; run status later with ssh-agent or --identity.\n", terminalSafeInline(device.Name))
+				case verr != nil:
+					fmt.Fprintf(out, "WARNING: could not verify %s: %s\n", terminalSafeInline(device.Name), terminalSafeInline(verr.Error()))
+				case ok:
+					fmt.Fprintf(out, "VERIFIED: %s is booted and reachable over SSH.\n", terminalSafeInline(device.Name))
+				default:
+					fmt.Fprintf(out, "NOTE: %s accepted the unlock but has not come back within %v; it may still be booting.\n", terminalSafeInline(device.Name), opts.verifyWindow)
+				}
+			}
+			return unlockAttemptResult{outcome: unlockOutcomeUnlocked}, nil
+		case fvcore.StatusUnlockedRecently:
+			if previousUnacknowledgedAttempt {
+				fmt.Fprintf(out, "VERIFIED: %s is booted after an earlier unlock attempt; the pre-boot success acknowledgement was not observed.\n", terminalSafeInline(device.Name))
+			} else {
+				fmt.Fprintf(out, "INFO: %s is already booted; normal macOS SSH accepted a public key. No unlock was needed.\n", terminalSafeInline(device.Name))
+			}
+			return unlockAttemptResult{outcome: unlockOutcomeUnlocked}, nil
+		case fvcore.StatusLocked:
+			// Wrong password; retrying will not help.
+			fmt.Fprintf(out, "FAILED: %s is still locked (incorrect password).\n", terminalSafeInline(device.Name))
+			return unlockAttemptResult{outcome: unlockOutcomeIncorrectPassword}, nil
+		default:
+			if errors.Is(res.Error, fvcore.ErrHostKeyMismatch) {
+				fmt.Fprintf(out, "SECURITY ERROR: refusing %s: %s\n", terminalSafeInline(device.Name), terminalSafeInline(res.Error.Error()))
+				return unlockAttemptResult{}, res.Error
+			}
+			if errors.Is(res.Error, fvcore.ErrUnlockOutcomeUnknown) {
+				previousUnacknowledgedAttempt = true
+				if opts.verifyWindow > 0 {
+					fmt.Fprintf(out, "The password was submitted, but %s did not acknowledge the outcome. Checking for normal macOS without sending the password again (up to %v)...\n", terminalSafeInline(device.Name), opts.verifyWindow)
+					verifyOpts := fvcore.DefaultVerifyOptions()
+					verifyOpts.Grace = 0
+					verifyOpts.Window = opts.verifyWindow
+					verifyOpts.Interval = 2 * time.Second
+					verifyOpts.AttemptTimeout = 5 * time.Second
+					if opts.verifyWindow < verifyOpts.AttemptTimeout {
+						verifyOpts.AttemptTimeout = opts.verifyWindow
+					}
+					ok, verr := fvcore.VerifyUnlock(ctx, client, fvDevice, verifyOpts)
+					switch {
+					case errors.Is(verr, fvcore.ErrHostKeyMismatch):
+						return unlockAttemptResult{}, verr
+					case ok:
+						fmt.Fprintf(out, "VERIFIED: %s is booted and reachable over SSH after the unlock attempt; the pre-boot success acknowledgement was not observed.\n", terminalSafeInline(device.Name))
+					case errors.Is(verr, fvcore.ErrIndeterminate):
+						fmt.Fprintf(out, "NOTE: %s is still reachable but its state cannot yet be proved without a public key; continuing the configured retry policy.\n", terminalSafeInline(device.Name))
+					case verr != nil:
+						if errors.Is(verr, context.Canceled) {
+							return unlockAttemptResult{}, verr
+						}
+						fmt.Fprintf(out, "NOTE: boot verification after the unacknowledged attempt failed: %s\n", terminalSafeInline(verr.Error()))
+					default:
+						fmt.Fprintf(out, "NOTE: %s did not return to normal SSH within %v; continuing the configured retry policy.\n", terminalSafeInline(device.Name), opts.verifyWindow)
+					}
+					if ok {
+						return unlockAttemptResult{outcome: unlockOutcomeUnlocked}, nil
+					}
+				}
+			}
+			// StatusUnknown: transient (network not up yet, dial
+			// error). These are the cases worth retrying.
+			if res.Error != nil {
+				fmt.Fprintf(out, "Attempt %d/%d failed: %s\n", attempts, opts.maxAttempts, terminalSafeInline(res.Error.Error()))
+			} else {
+				fmt.Fprintf(out, "Attempt %d/%d failed: device state unknown\n", attempts, opts.maxAttempts)
+			}
+			if attempts < opts.maxAttempts {
+				fmt.Fprintf(out, "Waiting %v before next attempt...\n", opts.retryDelay)
+				select {
+				case <-ctx.Done():
+					return unlockAttemptResult{}, ctx.Err()
+				case <-time.After(opts.retryDelay):
+				}
+				continue
+			}
+			fmt.Fprintf(out, "Error: reached max retry attempts for device '%s'. Giving up.\n", terminalSafeInline(device.Name))
+			return unlockAttemptResult{outcome: unlockOutcomeExhausted, lastError: res.Error}, nil
+		}
+	}
 }

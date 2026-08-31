@@ -16,6 +16,8 @@ import (
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
+
+	"github.com/shoon/fv-ssh-unlock/internal/securefs"
 )
 
 const maxIdentityFileSize = 1 << 20
@@ -76,6 +78,7 @@ func loadSigners(verbose bool, identityFiles []string) ([]ssh.Signer, error) {
 	// standard keys are not pushed past an SSH server's authentication-attempt
 	// limit by a large agent. Duplicates are removed below.
 	if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
+		// #nosec G704 -- SSH_AUTH_SOCK is the operator's local ssh-agent unix socket; dialing it is the standard agent protocol, not a network fetch of untrusted input.
 		if conn, err := net.DialTimeout("unix", sock, 2*time.Second); err == nil {
 			if s, err := agent.NewClient(conn).Signers(); err == nil {
 				signers = append(signers, s...)
@@ -120,11 +123,11 @@ func discoverDefaultIdentityFiles(home string) []string {
 }
 
 func readIdentityFile(path string) ([]byte, error) {
-	file, err := openStableRegularFileReadOnly(path)
+	file, err := securefs.OpenStable(path, "identity file")
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	info, err := file.Stat()
 	if err != nil {
 		return nil, err

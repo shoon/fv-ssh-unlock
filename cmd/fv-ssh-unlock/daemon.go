@@ -36,6 +36,15 @@ import (
 const controlAPISchemaVersion = 1
 const daemonLogSchemaVersion = 1
 
+// Default per-operation budgets. They are both the --probe-timeout /
+// --unlock-timeout flag defaults and the fallback daemonAdapter applies when it
+// is constructed without an explicit budget, so a configured flag is never
+// silently replaced by a shorter internal constant.
+const (
+	defaultProbeTimeout  = 15 * time.Second
+	defaultUnlockTimeout = 45 * time.Second
+)
+
 type daemonOptions struct {
 	socket            string
 	identityFiles     []string
@@ -78,8 +87,8 @@ intervenes; unreachable or indeterminate hosts never cause password release.`,
 	cmd.Flags().StringSlice("identity", nil, "Private key used to prove normal macOS is booted (repeatable)")
 	cmd.Flags().Duration("interval", 30*time.Second, "Normal device polling interval")
 	cmd.Flags().Duration("boot-interval", 5*time.Second, "Polling interval while a Mac is booting or its auto-recovery SSH endpoint is down")
-	cmd.Flags().Duration("probe-timeout", 15*time.Second, "Timeout for each password-free status probe")
-	cmd.Flags().Duration("unlock-timeout", 45*time.Second, "Timeout for a single automatic unlock operation")
+	cmd.Flags().Duration("probe-timeout", defaultProbeTimeout, "Timeout for each password-free status probe")
+	cmd.Flags().Duration("unlock-timeout", defaultUnlockTimeout, "Timeout for a single automatic unlock operation")
 	cmd.Flags().Int("concurrency", 4, "Maximum concurrent device operations")
 	cmd.Flags().Duration("discover-interval", 5*time.Minute, "Bonjour candidate discovery interval; 0 disables it")
 	cmd.Flags().Duration("discover-timeout", 8*time.Second, "Bonjour browse duration per discovery interval")
@@ -91,7 +100,7 @@ intervenes; unreachable or indeterminate hosts never cause password release.`,
 	cmd.Flags().String("log-format", "text", "Log format: text or json (use json for SIEM ingestion)")
 	cmd.Flags().String("log-level", "info", "Minimum log level: debug, info, warn, or error")
 	cmd.Flags().Bool("json-log", false, "Emit structured JSON logs (shorthand for --log-format json)")
-	cmd.Flags().Bool("once", false, "Poll configured devices once, print a JSON snapshot, and exit")
+	cmd.Flags().Bool("once", false, "Poll configured devices once, print a JSON snapshot, and exit; this pass can submit credentials to devices with auto_unlock enabled")
 	return cmd
 }
 
@@ -210,11 +219,12 @@ func runDaemon(ctx context.Context, output io.Writer, opts daemonOptions) (retur
 			return fmt.Errorf("automatic unlock preflight for %q: %w", device.Name, err)
 		}
 	}
-	client, err := newSSHClient(false, false, false, opts.identityFiles)
+	dialTimeout := minDuration(opts.probeTimeout, opts.unlockTimeout)
+	client, err := newSSHClient(false, false, false, opts.identityFiles, dialTimeout)
 	if err != nil {
 		return err
 	}
-	adapter := newDaemonAdapter(client, configured)
+	adapter := newDaemonAdapter(client, configured, opts.probeTimeout, opts.unlockTimeout)
 	monitorOpts := monitor.DefaultOptions()
 	monitorOpts.PollInterval = opts.pollInterval
 	monitorOpts.BootPollInterval = opts.bootInterval
@@ -251,8 +261,11 @@ func runDaemon(ctx context.Context, output io.Writer, opts daemonOptions) (retur
 	if err != nil {
 		return fmt.Errorf("open control socket: %w", err)
 	}
-	defer listener.Close()
-	api := &daemonAPI{startedAt: time.Now().UTC(), engine: engine, inbox: inbox, store: store, adapter: adapter, identities: opts.identityFiles, logger: logger}
+	defer func() { _ = listener.Close() }()
+	api := &daemonAPI{
+		startedAt: time.Now().UTC(), engine: engine, inbox: inbox, store: store, adapter: adapter,
+		identities: opts.identityFiles, probeTimeout: opts.probeTimeout, dialTimeout: dialTimeout, logger: logger,
+	}
 	eventBuffer := max(256, min(16384, len(configured)*8))
 	events, stopEvents := engine.Subscribe(eventBuffer)
 	defer stopEvents()
@@ -349,13 +362,13 @@ func newDaemonRunID() string {
 	var value [16]byte
 	if _, err := rand.Read(value[:]); err != nil {
 		binary.BigEndian.PutUint64(value[:8], uint64(time.Now().UnixNano()))
-		binary.BigEndian.PutUint64(value[8:], uint64(os.Getpid()))
+		binary.BigEndian.PutUint64(value[8:], uint64(os.Getpid())) // #nosec G115 -- PIDs are non-negative
 	}
 	return hex.EncodeToString(value[:])
 }
 
 func acquireDaemonLock(path string) (*os.File, error) {
-	lock, err := openPrivateRegularFile(path, os.O_CREATE|os.O_RDWR)
+	lock, err := securefs.OpenPrivate(path, "daemon lock", os.O_CREATE|os.O_RDWR)
 	if err != nil {
 		return nil, fmt.Errorf("open daemon lock: %w", err)
 	}
@@ -544,6 +557,11 @@ type daemonAdapter struct {
 	devices      map[string]config.Device
 	endpointDown map[string]bool
 	reachability func(context.Context, string) error
+	// probeTimeout and unlockTimeout are the operator-configured per-operation
+	// budgets. They are carried here rather than re-derived so --probe-timeout
+	// and --unlock-timeout are the values actually applied to each SSH call.
+	probeTimeout  time.Duration
+	unlockTimeout time.Duration
 }
 
 type daemonSSHClient interface {
@@ -551,8 +569,20 @@ type daemonSSHClient interface {
 	fvcore.StatusChecker
 }
 
-func newDaemonAdapter(client daemonSSHClient, devices []config.Device) *daemonAdapter {
-	adapter := &daemonAdapter{client: client, devices: make(map[string]config.Device, len(devices)), endpointDown: make(map[string]bool)}
+func newDaemonAdapter(client daemonSSHClient, devices []config.Device, probeTimeout, unlockTimeout time.Duration) *daemonAdapter {
+	if probeTimeout <= 0 {
+		probeTimeout = defaultProbeTimeout
+	}
+	if unlockTimeout <= 0 {
+		unlockTimeout = defaultUnlockTimeout
+	}
+	adapter := &daemonAdapter{
+		client:        client,
+		devices:       make(map[string]config.Device, len(devices)),
+		endpointDown:  make(map[string]bool),
+		probeTimeout:  probeTimeout,
+		unlockTimeout: unlockTimeout,
+	}
 	if _, realClient := client.(*fvcore.RealSSHClient); realClient {
 		adapter.reachability = probeTCPEndpoint
 	}
@@ -596,7 +626,7 @@ func (a *daemonAdapter) Probe(ctx context.Context, target monitor.Device) (monit
 		}
 		a.setEndpointDown(target.Name, false)
 	}
-	state, _, err := fvcore.CheckStatus(ctx, a.client, deviceEndpoint(device), device.User, remainingTimeout(ctx, 15*time.Second))
+	state, _, err := fvcore.CheckStatus(ctx, a.client, deviceEndpoint(device), device.User, remainingTimeout(ctx, a.probeTimeout))
 	switch {
 	case state == fvcore.StatusLocked:
 		a.setEndpointDown(target.Name, false)
@@ -684,7 +714,7 @@ func (a *daemonAdapter) Unlock(ctx context.Context, target monitor.Device) (moni
 	if successMessage == "" {
 		successMessage = defaultSuccessMessage
 	}
-	result := fvcore.Unlock(ctx, a.client, &staticStore{pw: password}, deviceEndpoint(device), device.User, deviceCredentialID(device), successMessage, remainingTimeout(ctx, 30*time.Second))
+	result := fvcore.Unlock(ctx, a.client, &staticStore{pw: password}, deviceEndpoint(device), device.User, deviceCredentialID(device), successMessage, remainingTimeout(ctx, a.unlockTimeout))
 	switch {
 	case result.Status == fvcore.StatusUnlocked:
 		return monitor.UnlockResult{Accepted: true, Detail: "FileVault accepted the credential"}, nil
@@ -693,7 +723,14 @@ func (a *daemonAdapter) Unlock(ctx context.Context, target monitor.Device) (moni
 	case errors.Is(result.Error, fvcore.ErrUnlockOutcomeUnknown):
 		return monitor.UnlockResult{Accepted: true, Detail: "credential submitted; acknowledgement unavailable; verifying without resubmission"}, result.Error
 	case result.Status == fvcore.StatusLocked || errors.Is(result.Error, fvcore.ErrAuthFailed):
-		return monitor.UnlockResult{}, monitor.NewFailure(monitor.FailureCredential, errors.New("FileVault rejected the configured credential"))
+		// Wrap rather than replace: the caller classifies this as a credential
+		// failure either way, but an operator clearing the latch needs to see
+		// why the credential was rejected.
+		rejected := errors.New("FileVault rejected the configured credential")
+		if result.Error != nil {
+			rejected = fmt.Errorf("FileVault rejected the configured credential: %w", result.Error)
+		}
+		return monitor.UnlockResult{}, monitor.NewFailure(monitor.FailureCredential, rejected)
 	case errors.Is(result.Error, fvcore.ErrHostKeyMismatch):
 		return monitor.UnlockResult{}, monitor.NewFailure(monitor.FailureHostKey, result.Error)
 	case result.Error != nil:
@@ -703,6 +740,10 @@ func (a *daemonAdapter) Unlock(ctx context.Context, target monitor.Device) (moni
 	}
 }
 
+// remainingTimeout returns the operation budget to apply: the caller-configured
+// fallback, shortened only when the context deadline would expire sooner. It
+// never lengthens a budget, so an already-expired context yields the fallback
+// and the operation fails on the context instead.
 func remainingTimeout(ctx context.Context, fallback time.Duration) time.Duration {
 	if deadline, ok := ctx.Deadline(); ok {
 		remaining := time.Until(deadline)
@@ -711,6 +752,15 @@ func remainingTimeout(ctx context.Context, fallback time.Duration) time.Duration
 		}
 	}
 	return fallback
+}
+
+// minDuration is spelled out because discover.go defines a package-level max
+// for ints, and pairing it with the builtin min would read inconsistently.
+func minDuration(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func toMonitorDevice(device config.Device) monitor.Device {
@@ -893,8 +943,16 @@ type daemonAPI struct {
 	store      *config.Store
 	adapter    *daemonAdapter
 	identities []string
-	logger     *slog.Logger
-	mutationMu sync.Mutex
+	// probeTimeout and dialTimeout mirror the daemon's configured budgets so an
+	// enrollment probe uses the same limits as ordinary monitoring.
+	probeTimeout time.Duration
+	dialTimeout  time.Duration
+	logger       *slog.Logger
+	mutationMu   sync.Mutex
+	// enrolling reserves candidates whose enrollment probe is in flight. The
+	// probe deliberately runs without mutationMu held, so this is what stops two
+	// concurrent requests from probing and enrolling the same candidate.
+	enrolling map[string]bool
 }
 
 func (a *daemonAPI) routes() http.Handler {
@@ -1005,30 +1063,46 @@ type enrollCandidateRequest struct {
 	AutoUnlock       bool   `json:"auto_unlock"`
 }
 
-func (a *daemonAPI) handleEnroll(w http.ResponseWriter, r *http.Request) {
-	a.mutationMu.Lock()
-	defer a.mutationMu.Unlock()
-	var request enrollCandidateRequest
-	if err := decodeAPIJSON(r, &request); err != nil {
-		writeAPIError(w, http.StatusBadRequest, err)
+// apiStatusError carries the HTTP status a validation failure should produce,
+// so precondition checks can be shared between the pre-probe and post-probe
+// passes of an enrollment without either duplicating status codes.
+type apiStatusError struct {
+	status int
+	err    error
+}
+
+func (e *apiStatusError) Error() string { return e.err.Error() }
+
+func (e *apiStatusError) Unwrap() error { return e.err }
+
+func apiError(status int, err error) error { return &apiStatusError{status: status, err: err} }
+
+func writeAPIStatusError(w http.ResponseWriter, err error) {
+	var statusErr *apiStatusError
+	if errors.As(err, &statusErr) {
+		writeAPIError(w, statusErr.status, statusErr.err)
 		return
 	}
-	candidate, ok := candidateByID(a.inbox.Snapshot(), r.PathValue("id"))
+	writeAPIError(w, http.StatusInternalServerError, err)
+}
+
+// validateEnrollment applies every precondition for enrolling a candidate and
+// returns the device that would be created. It performs no mutation, so it can
+// be run twice: once before the SSH probe and again after it, with the caller
+// holding mutationMu both times.
+func (a *daemonAPI) validateEnrollment(id string, request enrollCandidateRequest) (candidates.Candidate, config.Device, error) {
+	candidate, ok := candidateByID(a.inbox.Snapshot(), id)
 	if !ok {
-		writeAPIError(w, http.StatusNotFound, errors.New("candidate not found"))
-		return
+		return candidates.Candidate{}, config.Device{}, apiError(http.StatusNotFound, errors.New("candidate not found"))
 	}
 	if candidate.State == candidates.StateIgnored {
-		writeAPIError(w, http.StatusConflict, errors.New("candidate is ignored; restore it before enrollment"))
-		return
+		return candidates.Candidate{}, config.Device{}, apiError(http.StatusConflict, errors.New("candidate is ignored; restore it before enrollment"))
 	}
 	if len(candidate.ConfiguredNames) > 0 {
-		writeAPIError(w, http.StatusConflict, fmt.Errorf("candidate is already managed as %s", strings.Join(candidate.ConfiguredNames, ", ")))
-		return
+		return candidates.Candidate{}, config.Device{}, apiError(http.StatusConflict, fmt.Errorf("candidate is already managed as %s", strings.Join(candidate.ConfiguredNames, ", ")))
 	}
 	if candidate.Fingerprint == "" || request.Fingerprint != candidate.Fingerprint {
-		writeAPIError(w, http.StatusBadRequest, errors.New("the independently verified fingerprint must exactly match the current candidate fingerprint"))
-		return
+		return candidates.Candidate{}, config.Device{}, apiError(http.StatusBadRequest, errors.New("the independently verified fingerprint must exactly match the current candidate fingerprint"))
 	}
 	if request.Port == 0 {
 		request.Port = 22
@@ -1038,8 +1112,7 @@ func (a *daemonAPI) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		request.CredentialSource = credentials.ProviderRuntime
 	}
 	if request.CredentialSource == credentials.ProviderKeyring {
-		writeAPIError(w, http.StatusBadRequest, errors.New("candidate enrollment cannot create a keyring credential; use a pre-provisioned file reference, runtime for manual unlock, or config add for a known device"))
-		return
+		return candidates.Candidate{}, config.Device{}, apiError(http.StatusBadRequest, errors.New("candidate enrollment cannot create a keyring credential; use a pre-provisioned file reference, runtime for manual unlock, or config add for a known device"))
 	}
 	device := config.Device{
 		Name: request.Name, Host: request.Host, User: request.User, Port: request.Port,
@@ -1047,37 +1120,109 @@ func (a *daemonAPI) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		CredentialRef: request.CredentialRef, SuccessMessage: defaultSuccessMessage, AutoUnlock: request.AutoUnlock,
 	}
 	if err := config.ValidateDevice(device); err != nil {
-		writeAPIError(w, http.StatusBadRequest, err)
-		return
+		return candidates.Candidate{}, config.Device{}, apiError(http.StatusBadRequest, err)
 	}
 	configured, err := a.store.Load()
 	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, err)
-		return
+		return candidates.Candidate{}, config.Device{}, apiError(http.StatusInternalServerError, err)
 	}
 	if err := config.ValidateDevices(append(configured, device)); err != nil {
-		writeAPIError(w, http.StatusConflict, err)
-		return
+		return candidates.Candidate{}, config.Device{}, apiError(http.StatusConflict, err)
 	}
 	if err := assessDaemonDevice(device); err != nil {
+		return candidates.Candidate{}, config.Device{}, apiError(http.StatusBadRequest, err)
+	}
+	return candidate, device, nil
+}
+
+// beginEnrollment validates the request and reserves the candidate for the
+// duration of the SSH probe. The reservation is what makes releasing mutationMu
+// during the probe safe against a second request for the same candidate.
+func (a *daemonAPI) beginEnrollment(id string, request enrollCandidateRequest) (candidates.Candidate, config.Device, error) {
+	a.mutationMu.Lock()
+	defer a.mutationMu.Unlock()
+	if a.enrolling[id] {
+		return candidates.Candidate{}, config.Device{}, apiError(http.StatusConflict, errors.New("an enrollment for this candidate is already in progress"))
+	}
+	candidate, device, err := a.validateEnrollment(id, request)
+	if err != nil {
+		return candidates.Candidate{}, config.Device{}, err
+	}
+	if a.enrolling == nil {
+		a.enrolling = make(map[string]bool)
+	}
+	a.enrolling[id] = true
+	return candidate, device, nil
+}
+
+func (a *daemonAPI) endEnrollment(id string) {
+	a.mutationMu.Lock()
+	delete(a.enrolling, id)
+	a.mutationMu.Unlock()
+}
+
+func (a *daemonAPI) handleEnroll(w http.ResponseWriter, r *http.Request) {
+	var request enrollCandidateRequest
+	if err := decodeAPIJSON(r, &request); err != nil {
 		writeAPIError(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := enrollExpectedHostKey(r.Context(), device, candidate.Fingerprint, a.identities); err != nil {
+	id := r.PathValue("id")
+	candidate, device, err := a.beginEnrollment(id, request)
+	if err != nil {
+		writeAPIStatusError(w, err)
+		return
+	}
+	defer a.endEnrollment(id)
+
+	// The probe is a full SSH round trip bounded by the configured probe
+	// timeout. Running it under mutationMu would block every other control
+	// mutation for that long, past the control server's write timeout, so it
+	// runs unlocked and the preconditions are re-checked below. It only reads
+	// the candidate's key; nothing is pinned or configured yet.
+	pending, err := probeExpectedHostKey(r.Context(), device, candidate.Fingerprint, a.identities, a.dialTimeout, a.probeTimeout)
+	if err != nil {
 		writeAPIError(w, http.StatusBadGateway, err)
 		return
 	}
+
+	a.mutationMu.Lock()
+	defer a.mutationMu.Unlock()
+	// Re-validate everything after the probe. The candidate may have been
+	// ignored, re-observed with a different key, or configured by another path
+	// while the probe was running; enrolling on the pre-probe view would be a
+	// time-of-check/time-of-use hole around credential release.
+	recheckCandidate, recheckDevice, err := a.validateEnrollment(id, request)
+	if err != nil {
+		writeAPIStatusError(w, err)
+		return
+	}
+	if recheckCandidate.Fingerprint != candidate.Fingerprint || recheckDevice != device {
+		writeAPIError(w, http.StatusConflict, errors.New("candidate or device details changed during enrollment; nothing was trusted or configured"))
+		return
+	}
+
+	// Register first, pin second: an enrollment that fails after this point is
+	// rolled back completely, so configuration and trust state never diverge.
 	if err := a.store.Add(device); err != nil {
 		writeAPIError(w, http.StatusConflict, err)
 		return
 	}
 	a.adapter.addDevice(device)
-	if err := a.engine.AddDevice(toMonitorDevice(device)); err != nil {
-		a.adapter.removeDevice(device.Name)
-		_ = a.store.Remove(device.Name)
-		writeAPIError(w, http.StatusInternalServerError, err)
+	knownHosts, err := knownHostsPath()
+	if err != nil {
+		a.failEnrollment(w, http.StatusInternalServerError, device, pendingHostKey{}, err)
 		return
 	}
+	if err := commitPendingHostKey(knownHosts, pending); err != nil {
+		a.failEnrollment(w, http.StatusBadGateway, device, pendingHostKey{}, err)
+		return
+	}
+	if err := a.engine.AddDevice(toMonitorDevice(device)); err != nil {
+		a.failEnrollment(w, http.StatusInternalServerError, device, pending, err)
+		return
+	}
+
 	verified := candidate
 	if updated, markErr := a.inbox.MarkVerified(candidate.ID); markErr != nil {
 		a.logger.Warn("device enrolled but candidate state update failed", "event", "candidate.state_update_failed", "device", terminalSafeInline(device.Name), "candidate_id", terminalSafeInline(candidate.ID), "error", terminalSafeError(markErr))
@@ -1095,25 +1240,74 @@ func (a *daemonAPI) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	}{SchemaVersion: controlAPISchemaVersion, Device: device, Candidate: verified})
 }
 
-func enrollExpectedHostKey(ctx context.Context, device config.Device, fingerprint string, identities []string) error {
+// failEnrollment rolls a partial enrollment back and reports the failure. A
+// rollback that cannot complete is reported to the caller as well as logged:
+// leftover trust or configuration state needs operator attention, so it must
+// not be swallowed.
+func (a *daemonAPI) failEnrollment(w http.ResponseWriter, status int, device config.Device, pinned pendingHostKey, cause error) {
+	if rollbackErr := a.rollbackEnrollment(device, pinned); rollbackErr != nil {
+		writeAPIError(w, status, errors.Join(cause, fmt.Errorf("enrollment rollback did not complete: %w", rollbackErr)))
+		return
+	}
+	writeAPIError(w, status, cause)
+}
+
+// rollbackEnrollment undoes the mutations handleEnroll performs, in reverse
+// order. A zero pinned key means the host key was never recorded.
+func (a *daemonAPI) rollbackEnrollment(device config.Device, pinned pendingHostKey) error {
+	a.adapter.removeDevice(device.Name)
+	var errs []error
+	if pinned.key != nil {
+		path, err := knownHostsPath()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("locate known_hosts: %w", err))
+		} else if err := removeKnownHost(path, pinned.hostname, pinned.key); err != nil {
+			errs = append(errs, fmt.Errorf("unpin host key: %w", err))
+		}
+	}
+	if err := a.store.Remove(device.Name); err != nil {
+		errs = append(errs, fmt.Errorf("remove configuration entry: %w", err))
+	}
+	err := errors.Join(errs...)
+	if err != nil && a.logger != nil {
+		a.logger.Error("enrollment rollback did not fully complete", "event", "candidate.enroll_rollback_failed", "device", terminalSafeInline(device.Name), "error", terminalSafeError(err))
+	}
+	return err
+}
+
+// probeExpectedHostKey proves the candidate still presents the independently
+// verified key, without recording anything. The key it observed is returned so
+// the caller can pin it only after the device is registered; a zero value means
+// the host was already pinned and nothing new needs recording.
+func probeExpectedHostKey(ctx context.Context, device config.Device, fingerprint string, identities []string, dialTimeout, probeTimeout time.Duration) (pendingHostKey, error) {
 	path, err := knownHostsPath()
 	if err != nil {
-		return err
+		return pendingHostKey{}, err
 	}
-	callback, err := hostKeyCallbackExpected(path, true, fingerprint)
+	var pending pendingHostKey
+	callback, err := hostKeyCallbackFunc(path, true, fingerprint, func(observed pendingHostKey) error {
+		pending = observed
+		return nil
+	})
 	if err != nil {
-		return err
+		return pendingHostKey{}, err
 	}
 	signers, err := loadSigners(false, identities)
 	if err != nil {
-		return err
+		return pendingHostKey{}, err
 	}
-	client := &fvcore.RealSSHClient{DialTimeout: 15 * time.Second, Signers: signers, HostKeyCallback: callback}
-	_, _, probeErr := fvcore.CheckStatus(ctx, client, deviceEndpoint(device), device.User, 15*time.Second)
+	if dialTimeout <= 0 {
+		dialTimeout = defaultDialTimeout
+	}
+	if probeTimeout <= 0 {
+		probeTimeout = defaultProbeTimeout
+	}
+	client := &fvcore.RealSSHClient{DialTimeout: dialTimeout, Signers: signers, HostKeyCallback: callback}
+	_, _, probeErr := fvcore.CheckStatus(ctx, client, deviceEndpoint(device), device.User, probeTimeout)
 	if probeErr != nil && !errors.Is(probeErr, fvcore.ErrIndeterminate) {
-		return probeErr
+		return pendingHostKey{}, probeErr
 	}
-	return nil
+	return pending, nil
 }
 
 func candidateByID(snapshot candidates.Snapshot, id string) (candidates.Candidate, bool) {

@@ -117,7 +117,7 @@ func runInteractiveTUI(ctx context.Context, input io.Reader, output io.Writer, c
 	if err != nil {
 		return err
 	}
-	defer term.Restore(int(inFile.Fd()), oldState)
+	defer func() { _ = term.Restore(int(inFile.Fd()), oldState) }()
 	defer fmt.Fprint(output, "\x1b[?25h\x1b[0m\r\n")
 	fmt.Fprint(output, "\x1b[?25l")
 
@@ -206,7 +206,7 @@ func renderDashboard(output io.Writer, snapshot dashboardSnapshot, clear bool, m
 		if !device.NextCheckAt.IsZero() {
 			next = relativeTime(device.NextCheckAt)
 		}
-		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\n", index+1, terminalSafeInline(device.Name), device.State,
+		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\n", index+1, terminalSafeInline(device.Name), terminalSafeInline(string(device.State)),
 			relativeTime(device.LastCheckedAt), auto, next)
 	}
 	if len(snapshot.Devices.Devices) == 0 {
@@ -225,7 +225,7 @@ func renderDashboard(output io.Writer, snapshot dashboardSnapshot, clear bool, m
 		if fingerprint == "" {
 			fingerprint = "pending active scan"
 		}
-		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\n", index+1, terminalSafeInline(location), candidate.State,
+		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\n", index+1, terminalSafeInline(location), terminalSafeInline(string(candidate.State)),
 			terminalSafeInline(shortFingerprint(fingerprint)), relativeTime(candidate.LastSeen))
 	}
 	if len(snapshot.Candidates.Candidates) == 0 {
@@ -239,7 +239,7 @@ func renderDashboard(output io.Writer, snapshot dashboardSnapshot, clear bool, m
 		fmt.Fprintln(output, "\nRecent events")
 		start := max(0, len(snapshot.Devices.Events)-6)
 		for _, event := range snapshot.Devices.Events[start:] {
-			fmt.Fprintf(output, "%s  %-16s %-16s %s\n", event.Time.Local().Format("15:04:05"), terminalSafeInline(event.Device), event.State, terminalSafeInline(event.Message))
+			fmt.Fprintf(output, "%s  %-16s %-16s %s\n", event.Time.Local().Format("15:04:05"), terminalSafeInline(event.Device), terminalSafeInline(string(event.State)), terminalSafeInline(event.Message))
 		}
 	}
 	if message != "" {
@@ -269,7 +269,12 @@ func enrollCandidateFromTUI(ctx context.Context, output io.Writer, keys <-chan b
 	if candidate.Fingerprint == "" {
 		return "Candidate has no SSH fingerprint yet; wait for an authorized active scan before enrollment."
 	}
-	fmt.Fprintf(output, "\r\nOn the candidate Mac, run:\r\n  ssh-keygen -lf %s\r\nExpected candidate identity: %s\r\n", candidateHostKeyPath(candidate.KeyType), candidate.Fingerprint)
+	// The fingerprint and key type are network-derived. internal/candidates
+	// already strips control runes at ingestion, but every print site in this
+	// package sanitizes independently so the guarantee does not depend on
+	// another package's ingestion rules.
+	fmt.Fprintf(output, "\r\nOn the candidate Mac, run:\r\n  ssh-keygen -lf %s\r\nExpected candidate identity: %s\r\n",
+		terminalSafeInline(candidateHostKeyPath(candidate.KeyType)), terminalSafeInline(candidate.Fingerprint))
 	verified, err := promptRawLine(output, keys, "Enter the complete fingerprint displayed locally on the Mac")
 	if err != nil {
 		return err.Error()
@@ -424,7 +429,10 @@ func promptIndex(output io.Writer, keys <-chan byte, label string, count int) (i
 }
 
 func promptRawLineDefault(output io.Writer, keys <-chan byte, label, defaultValue string) (string, error) {
-	value, err := promptRawLine(output, keys, fmt.Sprintf("%s [%s]", label, defaultValue))
+	// Defaults are candidate-derived (an advertised Bonjour name or hostname),
+	// so the prompt shows a sanitized rendering while the raw value is what the
+	// operator accepts by pressing return.
+	value, err := promptRawLine(output, keys, fmt.Sprintf("%s [%s]", label, terminalSafeInline(defaultValue)))
 	if value == "" {
 		value = defaultValue
 	}

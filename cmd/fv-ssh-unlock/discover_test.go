@@ -5,7 +5,10 @@
 package main
 
 import (
+	"bytes"
+	"io"
 	"net"
+	"os"
 	"sort"
 	"strings"
 	"testing"
@@ -139,4 +142,67 @@ func TestLanInterfacesExcludesTunnelsAndLoopback(t *testing.T) {
 	if got := lanInterfaces("definitely-not-a-real-iface0"); len(got) != 0 {
 		t.Errorf("unknown interface should yield no interfaces, got %d", len(got))
 	}
+}
+
+// TestPrintDevicesKeepsHostsSharingABonjourName guards against collapsing the
+// table by display label: two Macs can advertise the same instance name, and
+// both must still be listed.
+func TestPrintDevicesKeepsHostsSharingABonjourName(t *testing.T) {
+	found := map[string]*device{}
+
+	first := &zeroconf.ServiceEntry{HostName: "lab-mac.local.", Port: 22}
+	first.Instance = `MacBook\ Pro`
+	first.AddrIPv4 = parseIPs("192.0.2.30")
+
+	second := &zeroconf.ServiceEntry{HostName: "spare-mac.local.", Port: 22}
+	second.Instance = `MacBook\ Pro`
+	second.AddrIPv4 = parseIPs("192.0.2.31")
+
+	merge(found, first)
+	merge(found, second)
+	if len(found) != 2 {
+		t.Fatalf("expected 2 accumulated hosts, got %v", keysOf(found))
+	}
+
+	rendered := captureStdout(t, func() { printDevices(found, 1) })
+	for _, phrase := range []string{"lab-mac.local", "spare-mac.local", "192.0.2.30", "192.0.2.31", "2 SSH service host(s)"} {
+		if !strings.Contains(rendered, phrase) {
+			t.Errorf("discovery table is missing %q:\n%s", phrase, rendered)
+		}
+	}
+}
+
+func TestPrintDevicesReportsAnEmptyResult(t *testing.T) {
+	rendered := captureStdout(t, func() { printDevices(map[string]*device{}, 3) })
+	if !strings.Contains(rendered, "No Bonjour SSH services found after 3 browse round(s)") {
+		t.Fatalf("unexpected empty discovery output:\n%s", rendered)
+	}
+}
+
+// captureStdout collects what fn writes to os.Stdout, which is where the
+// discovery table is printed.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := os.Stdout
+	os.Stdout = writer
+	collected := make(chan string, 1)
+	go func() {
+		var buffer bytes.Buffer
+		_, _ = io.Copy(&buffer, reader)
+		collected <- buffer.String()
+	}()
+	fn()
+	os.Stdout = original
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rendered := <-collected
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return rendered
 }

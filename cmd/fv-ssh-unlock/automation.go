@@ -46,6 +46,7 @@ func newConfigExportCommand() *cobra.Command {
 			}
 			encoder := json.NewEncoder(cmd.OutOrStdout())
 			encoder.SetIndent("", "  ")
+			// #nosec G117 -- Device.Cred is a credential provider reference, never secret material; `config export` deliberately emits the full declarative inventory.
 			return encoder.Encode(devices)
 		},
 	}
@@ -161,15 +162,16 @@ generated directly by configuration-management tools such as Ansible.`,
 }
 
 func readDeclarativeConfig(stdin io.Reader, path string) ([]byte, error) {
-	var reader io.Reader = stdin
+	reader := stdin
 	var file *os.File
 	if path != "-" {
 		var err error
+		// #nosec G304 -- path is the operator-supplied declarative config file; opening it is the point of `config apply`.
 		file, err = os.Open(path)
 		if err != nil {
 			return nil, err
 		}
-		defer file.Close()
+		defer func() { _ = file.Close() }()
 		reader = file
 	}
 	data, err := io.ReadAll(io.LimitReader(reader, maxDeclarativeConfigSize+1))

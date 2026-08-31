@@ -3,10 +3,13 @@
 package main
 
 import (
+	"bytes"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/shoon/fv-ssh-unlock/internal/candidates"
+	"github.com/shoon/fv-ssh-unlock/internal/monitor"
 )
 
 func TestCandidateDisplayDefaults(t *testing.T) {
@@ -41,6 +44,67 @@ func TestCandidateHostKeyPathUsesDiscoveredKeyType(t *testing.T) {
 	} {
 		if got := candidateHostKeyPath(keyType); got != want {
 			t.Errorf("candidateHostKeyPath(%q) = %q, want %q", keyType, got, want)
+		}
+	}
+}
+
+// hostile is a candidate-supplied string carrying terminal control sequences.
+// internal/candidates strips these at ingestion; this package sanitizes again at
+// every print site so the guarantee does not rest on another package's rules.
+const hostile = "mac\x1b[2Kevil\r\nSUCCESS: forged"
+
+func TestRenderDashboardEscapesNetworkDerivedText(t *testing.T) {
+	snapshot := dashboardSnapshot{}
+	snapshot.Devices.Devices = []monitor.DeviceSnapshot{{
+		Device:       monitor.Device{Name: hostile},
+		DeviceRecord: monitor.DeviceRecord{State: monitor.State(hostile)},
+	}}
+	snapshot.Devices.Events = []monitor.Event{{Device: hostile, State: monitor.State(hostile), Message: hostile, Time: time.Now()}}
+	snapshot.Candidates.Candidates = []candidates.Candidate{{
+		ID:        "cand_1",
+		State:     candidates.State(hostile),
+		Hostnames: []string{hostile},
+	}}
+
+	var output bytes.Buffer
+	if err := renderDashboard(&output, snapshot, false, hostile); err != nil {
+		t.Fatal(err)
+	}
+	assertTerminalSafe(t, output.String())
+}
+
+func TestCandidatePromptDefaultsAreEscaped(t *testing.T) {
+	var output bytes.Buffer
+	keys := make(chan byte, 1)
+	keys <- '\r'
+	value, err := promptRawLineDefault(&output, keys, "Local alias", hostile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The raw value is still what the operator accepts; only the display is
+	// sanitized.
+	if value != hostile {
+		t.Fatalf("accepted default = %q, want the raw candidate value", value)
+	}
+	assertTerminalSafe(t, output.String())
+}
+
+// assertTerminalSafe fails when rendered output carries a raw control sequence
+// that a hostile candidate could use to forge or erase terminal text. The
+// renderer emits its own CR/LF and cursor toggles, so those fixed sequences are
+// removed before the check.
+func assertTerminalSafe(t *testing.T, rendered string) {
+	t.Helper()
+	if !strings.Contains(rendered, `\u001B`) {
+		t.Fatalf("escape sequence was not rendered in escaped form:\n%q", rendered)
+	}
+	stripped := rendered
+	for _, own := range []string{"\x1b[?25h", "\x1b[?25l", "\x1b[H\x1b[2J", "\r\n"} {
+		stripped = strings.ReplaceAll(stripped, own, " ")
+	}
+	for _, forbidden := range []string{"\x1b", "\r"} {
+		if strings.Contains(stripped, forbidden) {
+			t.Fatalf("output carries unescaped %q:\n%q", forbidden, rendered)
 		}
 	}
 }
