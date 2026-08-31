@@ -4,6 +4,12 @@ project_name: fv-ssh-unlock
 before:
   hooks:
     - go mod tidy -diff
+    # Package a copy of the systemd unit with ExecStart pointed at the
+    # nfpm-installed /usr/bin path (see nfpms[].bindir below). The tracked
+    # deploy/systemd/fv-ssh-unlock.service keeps ExecStart=/usr/local/bin/...
+    # for source/archive installs; this generated copy is package-only and is
+    # never committed.
+    - sh -c "mkdir -p .packaging/systemd && sed 's#/usr/local/bin/fv-ssh-unlock#/usr/bin/fv-ssh-unlock#' deploy/systemd/fv-ssh-unlock.service > .packaging/systemd/fv-ssh-unlock.service"
 
 builds:
   - id: fv-ssh-unlock
@@ -11,6 +17,11 @@ builds:
     binary: fv-ssh-unlock
     env:
       - CGO_ENABLED=0
+      # Release builds must resolve dependencies the same way the Docker
+      # build does (plain module mode from go.mod/go.sum), not workspace
+      # mode from the repo-root go.work, so the two build paths cannot
+      # silently diverge on resolved versions.
+      - GOWORK=off
     flags:
       - -tags=keyring
       - -trimpath
@@ -78,6 +89,13 @@ nfpms:
         dst: /usr/share/doc/fv-ssh-unlock/THIRD_PARTY_NOTICES.txt
       - src: TRADEMARKS.md
         dst: /usr/share/doc/fv-ssh-unlock/TRADEMARKS.md
+      - src: .packaging/systemd/fv-ssh-unlock.service
+        dst: /usr/lib/systemd/system/fv-ssh-unlock.service
+        # A vendor unit under /usr/lib is package-owned and must be replaced on
+        # upgrade, so this is a plain file rather than config|noreplace. Local
+        # changes belong in /etc/systemd/system as a drop-in override.
+        file_info:
+          mode: 0644
 
 checksum:
   name_template: "checksums.txt"

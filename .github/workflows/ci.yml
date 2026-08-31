@@ -14,6 +14,13 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Build and test in plain module mode, the way the Docker build and the
+# release build resolve dependencies. The repo-root go.work is a local
+# development convenience; letting CI run in workspace mode would allow the
+# two dependency sets to diverge without anything failing.
+env:
+  GOWORK: "off"
+
 jobs:
   build-test:
     timeout-minutes: 20
@@ -55,7 +62,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -65,11 +72,45 @@ jobs:
         with:
           go-version: '1.26.7'
           cache-dependency-path: go.sum
-      - name: Build and test keyring backend
+      - name: Build and vet keyring backend
         run: |
           go build -tags keyring ./...
           go vet -tags keyring ./...
-          go test -tags keyring ./...
+      # go-keyring talks to the Secret Service over D-Bus on Linux, so the
+      # round-trip test needs a session bus with an unlocked gnome-keyring.
+      # The keyring-tagged Linux binary ships in the DEB/RPM packages and the
+      # container image, so this variant must be exercised here too.
+      - name: Install Linux Secret Service backend
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes gnome-keyring dbus-x11
+      - name: Test keyring backend (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          dbus-run-session -- bash -c '
+            printf "" | gnome-keyring-daemon --unlock --components=secrets
+            go test -tags keyring ./...
+          '
+      - name: Test keyring backend
+        if: runner.os != 'Linux'
+        run: go test -tags keyring ./...
+
+  lint:
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.26.7'
+          cache-dependency-path: go.sum
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.13.2
 
   security:
     timeout-minutes: 15
@@ -134,6 +175,14 @@ jobs:
           /usr/bin/fv-ssh-unlock --version
           /usr/bin/fv-ssh-unlock credentials providers --json
           dpkg --listfiles fv-ssh-unlock
+
+          # The packaged unit must point at the packaged binary path, not the
+          # /usr/local/bin path the tracked source unit uses.
+          test -f /usr/lib/systemd/system/fv-ssh-unlock.service
+          grep -q '^ExecStart=/usr/bin/fv-ssh-unlock ' \
+            /usr/lib/systemd/system/fv-ssh-unlock.service
+          systemd-analyze verify /usr/lib/systemd/system/fv-ssh-unlock.service
+
           sudo dpkg --remove fv-ssh-unlock
 
           rpm --query --package --info dist/*_linux_amd64.rpm
