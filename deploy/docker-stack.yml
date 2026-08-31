@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: Apache-2.0
+
+# Docker Swarm example. Create both external secrets before deploying this
+# stack. Do not put their values in this file.
+services:
+  controller:
+    image: "${FV_SSH_UNLOCK_IMAGE:?set FV_SSH_UNLOCK_IMAGE to a digest-pinned private image}"
+    user: "65532:65532"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      FV_SSH_UNLOCK_DATA_DIR: /data
+    command:
+      - daemon
+      - --socket
+      - /run/fv-ssh-unlock/control.sock
+      - --identity
+      - /run/secrets/macos-ssh-identity
+    volumes:
+      - type: bind
+        source: /var/lib/fv-ssh-unlock
+        target: /data
+    tmpfs:
+      - /run/fv-ssh-unlock:rw,noexec,nosuid,nodev,mode=0700,uid=65532,gid=65532
+    secrets:
+      - source: m4alpha-password
+        target: m4alpha-password
+        uid: "65532"
+        gid: "65532"
+        mode: 0400
+      - source: macos-ssh-identity
+        target: macos-ssh-identity
+        uid: "65532"
+        gid: "65532"
+        mode: 0400
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          # Pin the bind-mounted state and durable unlock-attempt markers to
+          # the explicitly selected controller node.
+          - node.labels.fv-ssh-unlock-controller == true
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 10
+
+secrets:
+  m4alpha-password:
+    external: true
+  macos-ssh-identity:
+    external: true

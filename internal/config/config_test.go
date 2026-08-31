@@ -5,14 +5,19 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"sync"
 	"testing"
+
+	"github.com/shoon/fv-ssh-unlock/internal/credentials"
 )
 
 func TestConfigAddRemoveList(t *testing.T) {
-	td := t.TempDir()
+	td := privateConfigTestDir(t)
 	path := filepath.Join(td, "devices.json")
 	s := &Store{Path: path}
 
@@ -61,6 +66,10 @@ func TestValidateDeviceRejectsAmbiguousOrUnsafeValues(t *testing.T) {
 		{Name: base.Name, Host: base.Host, User: " bad", Port: 22},
 		{Name: base.Name, Host: base.Host, User: base.User, Port: 65536},
 		{Name: base.Name, Host: base.Host, User: base.User, Port: 22, Cred: "fvu-another-device"},
+		{Name: base.Name, Host: base.Host, User: base.User, Port: 22, Cred: base.Cred, CredentialSource: "file"},
+		{Name: base.Name, Host: base.Host, User: base.User, Port: 22, Cred: base.Cred, CredentialSource: "file", CredentialRef: "relative/password"},
+		{Name: base.Name, Host: base.Host, User: base.User, Port: 22, Cred: base.Cred, CredentialSource: "file", CredentialRef: "systemd:../password"},
+		{Name: base.Name, Host: base.Host, User: base.User, Port: 22, Cred: base.Cred, CredentialSource: "runtime", CredentialRef: "/run/secrets/password"},
 		{Name: base.Name, Host: base.Host, User: base.User, Port: 22, MACAddress: "not-a-mac"},
 	}
 	for _, d := range cases {
@@ -71,6 +80,16 @@ func TestValidateDeviceRejectsAmbiguousOrUnsafeValues(t *testing.T) {
 	if err := ValidateDevice(base); err != nil {
 		t.Fatalf("valid device rejected: %v", err)
 	}
+	fileCredential := base
+	fileCredential.CredentialSource = "file"
+	fileCredential.CredentialRef = filepath.Join(t.TempDir(), "one")
+	if err := ValidateDevice(fileCredential); err != nil {
+		t.Fatalf("valid file credential rejected: %v", err)
+	}
+	fileCredential.CredentialRef = "systemd:one"
+	if err := ValidateDevice(fileCredential); err != nil {
+		t.Fatalf("valid systemd credential reference rejected: %v", err)
+	}
 	ipv6 := base
 	ipv6.Host = "2001:db8::1"
 	if err := ValidateDevice(ipv6); err != nil {
@@ -79,6 +98,30 @@ func TestValidateDeviceRejectsAmbiguousOrUnsafeValues(t *testing.T) {
 	ipv6.Host = "fe80::1%en0"
 	if err := ValidateDevice(ipv6); err != nil {
 		t.Fatalf("zoned IPv6 literal rejected: %v", err)
+	}
+}
+
+func TestValidateDeviceRejectsRuntimeCredentialForAutomaticUnlock(t *testing.T) {
+	device := Device{
+		Name:             "mac",
+		Host:             "192.0.2.10",
+		User:             "unlockuser",
+		Port:             22,
+		CredentialSource: credentials.ProviderRuntime,
+		AutoUnlock:       true,
+	}
+	if err := ValidateDevice(device); err == nil || !strings.Contains(err.Error(), "persistent secure credential") {
+		t.Fatalf("ValidateDevice() error = %v, want persistent-provider rejection", err)
+	}
+
+	device.CredentialSource = ""
+	if err := ValidateDevice(device); err == nil || !strings.Contains(err.Error(), "persistent secure credential") {
+		t.Fatalf("legacy runtime ValidateDevice() error = %v, want persistent-provider rejection", err)
+	}
+
+	device.Cred = credentials.ID(device.Name)
+	if err := ValidateDevice(device); err != nil {
+		t.Fatalf("legacy keyring-backed automatic unlock rejected: %v", err)
 	}
 }
 
@@ -98,7 +141,7 @@ func TestLoadRejectsOversizedConfiguration(t *testing.T) {
 }
 
 func TestAddDuplicate(t *testing.T) {
-	td := t.TempDir()
+	td := privateConfigTestDir(t)
 	path := filepath.Join(td, "devices.json")
 	s := &Store{Path: path}
 
@@ -112,8 +155,61 @@ func TestAddDuplicate(t *testing.T) {
 	}
 }
 
+func TestConcurrentAddsDoNotLoseDevices(t *testing.T) {
+	store := &Store{Path: filepath.Join(privateConfigTestDir(t), "devices.json")}
+	const count = 16
+	var wg sync.WaitGroup
+	errs := make(chan error, count)
+	for index := range count {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			name := fmt.Sprintf("mac-%02d", index)
+			errs <- store.Add(Device{Name: name, Host: fmt.Sprintf("192.0.2.%d", index+1), User: "user", Port: 22, Cred: credentials.ID(name)})
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	devices, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(devices) != count {
+		t.Fatalf("concurrent adds retained %d devices, want %d", len(devices), count)
+	}
+}
+
+func TestUpdateExistingDevice(t *testing.T) {
+	s := &Store{Path: filepath.Join(privateConfigTestDir(t), "devices.json")}
+	device := Device{Name: "mac", Host: "192.0.2.1", User: "user", Port: 22, Cred: "fvu-mac"}
+	if err := s.Add(device); err != nil {
+		t.Fatal(err)
+	}
+	device.AutoUnlock = true
+	if err := s.Update(device); err != nil {
+		t.Fatal(err)
+	}
+	devices, err := s.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(devices) != 1 || !devices[0].AutoUnlock {
+		t.Fatalf("unexpected devices: %+v", devices)
+	}
+	device.Name = "missing"
+	device.Cred = "fvu-missing"
+	if err := s.Update(device); err == nil {
+		t.Fatal("expected missing device update to fail")
+	}
+}
+
 func TestRemoveNotFound(t *testing.T) {
-	td := t.TempDir()
+	td := privateConfigTestDir(t)
 	path := filepath.Join(td, "devices.json")
 	s := &Store{Path: path}
 
@@ -129,7 +225,7 @@ func TestRemoveNotFound(t *testing.T) {
 }
 
 func TestConfigWithPort(t *testing.T) {
-	td := t.TempDir()
+	td := privateConfigTestDir(t)
 	path := filepath.Join(td, "devices.json")
 	s := &Store{Path: path}
 
@@ -148,6 +244,40 @@ func TestConfigWithPort(t *testing.T) {
 	if devs[0].Port != 2222 {
 		t.Fatalf("expected port 2222, got %d", devs[0].Port)
 	}
+}
+
+func TestFileCredentialReferenceRoundTrip(t *testing.T) {
+	path := filepath.Join(privateConfigTestDir(t), "devices.json")
+	credentialPath := filepath.Join(t.TempDir(), "office-mac")
+	s := &Store{Path: path}
+	want := Device{
+		Name:             "office-mac",
+		Host:             "192.0.2.10",
+		User:             "unlockuser",
+		Port:             22,
+		Cred:             "fvu-office-mac",
+		CredentialSource: "file",
+		CredentialRef:    credentialPath,
+	}
+	if err := s.Add(want); err != nil {
+		t.Fatal(err)
+	}
+	devices, err := s.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(devices) != 1 || devices[0] != want {
+		t.Fatalf("loaded devices = %+v, want %+v", devices, want)
+	}
+}
+
+func privateConfigTestDir(t *testing.T) string {
+	t.Helper()
+	directory := filepath.Join(t.TempDir(), "private")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return directory
 }
 
 func TestStoreRejectsCredentialEnvironmentCollision(t *testing.T) {

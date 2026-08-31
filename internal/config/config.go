@@ -14,9 +14,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"unicode"
 
 	"github.com/shoon/fv-ssh-unlock/internal/credentials"
+	"github.com/shoon/fv-ssh-unlock/internal/securefs"
 )
 
 const maxConfigSize = 1 << 20
@@ -29,13 +31,16 @@ type Device struct {
 	Port             int    `json:"port,omitempty"`
 	Cred             string `json:"cred"`
 	CredentialSource string `json:"credential_source,omitempty"`
+	CredentialRef    string `json:"credential_ref,omitempty"`
 	SuccessMessage   string `json:"success_message,omitempty"`
 	MACAddress       string `json:"mac_address,omitempty"`
+	AutoUnlock       bool   `json:"auto_unlock,omitempty"`
 }
 
 // Store manages a JSON file of devices.
 type Store struct {
 	Path string
+	mu   sync.Mutex
 }
 
 // Load returns the list of devices from the store file.
@@ -82,6 +87,12 @@ func (s *Store) Load() ([]Device, error) {
 
 // Save writes the devices to the store file.
 func (s *Store) Save(devs []Device) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.save(devs)
+}
+
+func (s *Store) save(devs []Device) error {
 	if err := validateDevices(devs); err != nil {
 		return err
 	}
@@ -93,15 +104,7 @@ func (s *Store) Save(devs []Device) error {
 		return fmt.Errorf("configuration exceeds %d bytes", maxConfigSize)
 	}
 	dir := filepath.Dir(s.Path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	if info, err := os.Lstat(dir); err != nil {
-		return err
-	} else if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("configuration directory is not a secure directory: %s", dir)
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
+	if err := securefs.EnsurePrivateDirectory(dir, "configuration"); err != nil {
 		return err
 	}
 	if info, err := os.Lstat(s.Path); err == nil {
@@ -141,6 +144,8 @@ func (s *Store) Save(devs []Device) error {
 
 // Add adds a device to the store.
 func (s *Store) Add(d Device) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	devs, err := s.Load()
 	if err != nil {
 		return err
@@ -152,11 +157,33 @@ func (s *Store) Add(d Device) error {
 		}
 	}
 	devs = append(devs, d)
-	return s.Save(devs)
+	return s.save(devs)
+}
+
+// Update replaces an existing device with the same name.
+func (s *Store) Update(d Device) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := ValidateDevice(d); err != nil {
+		return err
+	}
+	devs, err := s.Load()
+	if err != nil {
+		return err
+	}
+	for i := range devs {
+		if devs[i].Name == d.Name {
+			devs[i] = d
+			return s.save(devs)
+		}
+	}
+	return fmt.Errorf("device not found: %s", d.Name)
 }
 
 // Remove deletes a device by name.
 func (s *Store) Remove(name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	devs, err := s.Load()
 	if err != nil {
 		return err
@@ -173,7 +200,7 @@ func (s *Store) Remove(name string) error {
 	if !found {
 		return fmt.Errorf("device not found: %s", name)
 	}
-	return s.Save(out)
+	return s.save(out)
 }
 
 // ValidateDevice rejects values that could redirect a credential to an
@@ -196,8 +223,31 @@ func ValidateDevice(d Device) error {
 	if d.Port < 0 || d.Port > 65535 {
 		return fmt.Errorf("port must be zero (legacy default) or between 1 and 65535")
 	}
-	if d.CredentialSource != "" && d.CredentialSource != "keyring" && d.CredentialSource != "runtime" {
+	if d.CredentialSource != "" && d.CredentialSource != credentials.ProviderKeyring && d.CredentialSource != credentials.ProviderRuntime && d.CredentialSource != credentials.ProviderFile {
 		return fmt.Errorf("invalid credential source %q", d.CredentialSource)
+	}
+	if d.AutoUnlock {
+		source := d.CredentialSource
+		if source == "" {
+			if d.Cred == "" {
+				source = credentials.ProviderRuntime
+			} else {
+				source = credentials.ProviderKeyring
+			}
+		}
+		if source == credentials.ProviderRuntime {
+			return fmt.Errorf("automatic unlock requires a persistent secure credential provider; runtime/environment credentials are not accepted")
+		}
+	}
+	if d.CredentialSource == credentials.ProviderFile {
+		if err := validatePlain("credential reference", d.CredentialRef, 4096); err != nil {
+			return err
+		}
+		if _, err := credentials.NormalizeFileReference(d.CredentialRef); err != nil {
+			return err
+		}
+	} else if d.CredentialRef != "" {
+		return fmt.Errorf("credential reference is only valid with the file credential source")
 	}
 	if d.Cred != "" {
 		if err := validatePlain("credential identifier", d.Cred, 256); err != nil {
@@ -219,6 +269,12 @@ func ValidateDevice(d Device) error {
 		}
 	}
 	return nil
+}
+
+// ValidateDevices validates a complete declarative device inventory, including
+// cross-device constraints such as unique names and credential identifiers.
+func ValidateDevices(devices []Device) error {
+	return validateDevices(devices)
 }
 
 // validateDevices enforces invariants that involve more than one entry. In

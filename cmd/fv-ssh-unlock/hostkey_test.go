@@ -35,7 +35,7 @@ func testPublicKey(t *testing.T) ssh.PublicKey {
 }
 
 func TestHostKeyUnknownFailsClosed(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "known_hosts")
+	path := privateKnownHostsTestPath(t)
 	cb, err := hostKeyCallback(path, false)
 	if err != nil {
 		t.Fatal(err)
@@ -60,7 +60,7 @@ func TestNewSSHClientRejectsConflictingHostKeyFlags(t *testing.T) {
 }
 
 func TestHostKeyPinnedImmediatelyInSameProcess(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "known_hosts")
+	path := privateKnownHostsTestPath(t)
 	cb, err := hostKeyCallback(path, true)
 	if err != nil {
 		t.Fatal(err)
@@ -86,8 +86,36 @@ func TestHostKeyPinnedImmediatelyInSameProcess(t *testing.T) {
 	}
 }
 
+func TestHostKeyEnrollmentRequiresExpectedFingerprint(t *testing.T) {
+	path := privateKnownHostsTestPath(t)
+	presented := testPublicKey(t)
+	other := testPublicKey(t)
+	callback, err := hostKeyCallbackExpected(path, true, ssh.FingerprintSHA256(other))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := callback("host.example:22", &net.TCPAddr{}, presented); !errors.Is(err, fvcore.ErrHostKeyMismatch) {
+		t.Fatalf("mismatched expected fingerprint should fail: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) != 0 {
+		t.Fatal("mismatched key was recorded")
+	}
+
+	callback, err = hostKeyCallbackExpected(path, true, ssh.FingerprintSHA256(presented))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := callback("host.example:22", &net.TCPAddr{}, presented); err != nil {
+		t.Fatalf("matching expected fingerprint was rejected: %v", err)
+	}
+}
+
 func TestConcurrentHostKeyEnrollmentWritesOnce(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "known_hosts")
+	path := privateKnownHostsTestPath(t)
 	cb, err := hostKeyCallback(path, true)
 	if err != nil {
 		t.Fatal(err)
@@ -120,7 +148,7 @@ func TestConcurrentHostKeyEnrollmentWritesOnce(t *testing.T) {
 }
 
 func TestConcurrentCallbacksCannotEnrollConflictingKeys(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "known_hosts")
+	path := privateKnownHostsTestPath(t)
 	firstCallback, err := hostKeyCallback(path, true)
 	if err != nil {
 		t.Fatal(err)
@@ -162,6 +190,15 @@ func TestConcurrentCallbacksCannotEnrollConflictingKeys(t *testing.T) {
 	if accepted != 1 || rejected != 1 {
 		t.Fatalf("accepted=%d rejected=%d, want one of each", accepted, rejected)
 	}
+}
+
+func privateKnownHostsTestPath(t *testing.T) string {
+	t.Helper()
+	directory := filepath.Join(t.TempDir(), "private")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(directory, "known_hosts")
 }
 
 func TestHostKeyStoreRejectsSymlink(t *testing.T) {

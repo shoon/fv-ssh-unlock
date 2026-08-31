@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: Apache-2.0
+
+all:
+  children:
+    fv_controllers:
+      hosts:
+        homelab-controller:
+          ansible_host: 192.0.2.5
+          ansible_user: pi
+          # This example is run from a source checkout after ./build.sh.
+          fv_ssh_unlock_binary_source: "{{ playbook_dir }}/../../dist/fv-ssh-unlock"
+          # Provision these encrypted blobs on the controller before running
+          # the role. No plaintext credential belongs in inventory.
+          fv_ssh_unlock_systemd_credentials:
+            - name: m4alpha
+              encrypted_path: /etc/credstore.encrypted/m4alpha.cred
+            - name: macos-ssh-identity
+              encrypted_path: /etc/credstore.encrypted/macos-ssh-identity.cred
+          fv_ssh_unlock_identity_credential: macos-ssh-identity
+          fv_ssh_unlock_devices:
+            - name: m4alpha
+              host: 192.0.2.42
+              user: unlockuser
+              port: 22
+              cred: fvu-m4alpha
+              credential_source: file
+              credential_ref: systemd:m4alpha
+              auto_unlock: true
+    managed_macs:
+      hosts:
+        m4alpha:
+          ansible_host: 192.0.2.42
+          fv_ssh_unlock_credential_ref: systemd:m4alpha

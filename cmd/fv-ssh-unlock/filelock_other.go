@@ -13,3 +13,4 @@ import "os"
 // across separate processes.
 func lockKnownHostsFile(*os.File) error { return nil }
 func unlockKnownHostsFile(*os.File)     {}
+func tryLockDaemonFile(*os.File) error  { return nil }

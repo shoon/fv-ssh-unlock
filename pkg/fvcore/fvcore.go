@@ -117,8 +117,14 @@ func Unlock(ctx context.Context, client SSHClient, store CredentialStore, host, 
 	}
 
 	status, out, err := client.AnalyzePrompt(ctx, host, user, pass, successMsg)
-	if ctxErr := effectiveContextError(ctx); ctxErr != nil {
-		return UnlockResult{Host: host, Status: StatusUnknown, Output: out, Error: ctxErr}
+	// Preserve an authoritative protocol result even if it arrived exactly as
+	// the operation deadline expired. In particular, a FileVault success banner
+	// proves that the password was accepted and cannot be undone by a later
+	// connection timeout.
+	if status == StatusUnknown && err == nil {
+		if ctxErr := effectiveContextError(ctx); ctxErr != nil {
+			return UnlockResult{Host: host, Status: StatusUnknown, Output: out, Error: ctxErr}
+		}
 	}
 	return UnlockResult{Host: host, Status: status, Output: out, Error: err}
 }

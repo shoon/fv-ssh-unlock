@@ -2,6 +2,65 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Added
+
+- Foreground `daemon` with explicit per-device automatic unlock, bounded
+  concurrency, jittered polling, durable lock episodes, one-submission guards,
+  cooldowns, failure latches, and password-free post-boot verification.
+- Lightweight `tui`, local Unix-socket v1 API, built-in `healthcheck`, and
+  versioned JSON status/dashboard output.
+- Persistent Bonjour and opt-in CIDR candidate discovery with fingerprint-first
+  deduplication, review/ignore state, exact out-of-band fingerprint enrollment,
+  and immediate monitoring of newly approved devices.
+- Declarative `config export`, `config apply --check --json`, and per-device
+  `config auto-unlock` commands for infrastructure automation.
+- A single-layer, non-root `FROM scratch` container for Linux AMD64 and ARM64,
+  hardened Compose/Swarm/systemd examples, an image/runtime verifier, and a
+  manual private-image workflow with SBOM, provenance, and keyless signing.
+- An example Ansible controller role, inventory, local-API query, and
+  non-secret device-inventory reconciliation.
+- Timestamped daemon logs with text/JSON formats, configurable levels, stable
+  versioned event fields, and stdout/stderr collection suitable for journald,
+  Docker logging drivers, Fluent Bit, Vector, and SIEM pipelines.
+- Credential-provider registry with runtime, OS-keyring, and externally managed
+  file providers.
+- `credentials providers` human-readable and JSON capability reports, including
+  keyring availability, secure file-delivery detection, and honest TPM2 backend
+  status.
+- Docker Swarm secret and systemd credential-file integration without new
+  runtime dependencies, including portable `systemd:<name>` references.
+- An action-scoped `--allow-unsafe-credential-storage` override for plaintext
+  disk credential files; unsafe storage is otherwise refused and is never an
+  automatic fallback.
+
+### Changed
+
+- Automatic-recovery targets use a short TCP/22 preflight after an endpoint is
+  known down, avoiding ICMP while waking the pinned SSH probe promptly when the
+  network returns. TCP reachability alone never releases a credential.
+- `status` now follows normal SSH expectations by trying standard private-key
+  filenames in `~/.ssh` when `--identity` is omitted, reports positive booted
+  state as `booted`, and calls ambiguous password-free evidence
+  `indeterminate`.
+- `unlock` and `config remove` now require explicit `--all` for fleet-wide
+  actions. Named multi-target operations validate every name before making a
+  change and return an unsuccessful exit status for partial failures.
+- Status operational failures now produce an unsuccessful exit status;
+  `status --require-known` also makes an indeterminate state unsuccessful for
+  automation.
+- Unlock classification now returns success immediately when FileVault emits
+  its authoritative post-password success banner, even if the pre-boot SSH
+  server keeps the connection open instead of disconnecting promptly.
+- When FileVault accepts a password but does not acknowledge the outcome before
+  the SSH timeout, `unlock` now performs password-free boot verification before
+  considering a retry and reports the distinction explicitly.
+- Unlock attempts watch the configured SSH TCP endpoint after password
+  submission and begin boot verification as soon as the pre-boot service goes
+  away. This provides event-driven transition detection without depending on
+  ICMP/ping; only pinned public-key SSH authentication can prove success.
+
 ## [0.1.0] - 2026-08-27
 
 Initial public release.

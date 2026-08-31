@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: Apache-2.0
+
+# Standalone Compose example. It intentionally does not declare file-backed
+# Compose secrets: those remain plaintext on the host and are rejected by
+# fv-ssh-unlock unless the unsafe override is explicitly supplied.
+services:
+  fv-ssh-unlock:
+    image: "${FV_SSH_UNLOCK_IMAGE:?set FV_SSH_UNLOCK_IMAGE to a versioned tag or digest}"
+    user: "65532:65532"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    environment:
+      FV_SSH_UNLOCK_DATA_DIR: /data
+    command:
+      - daemon
+      - --socket
+      - /run/fv-ssh-unlock/control.sock
+      - --identity
+      - /run/secrets/macos-ssh-identity
+    volumes:
+      - type: bind
+        source: "${FV_SSH_UNLOCK_DATA_DIR:?set FV_SSH_UNLOCK_DATA_DIR to an owned host directory}"
+        target: /data
+      # The source must itself be tmpfs/ramfs (for example a secret-agent
+      # directory below /run), owned/readable by UID 65532, and contain only
+      # the credentials this service needs.
+      - type: bind
+        source: "${FV_SSH_UNLOCK_SECRET_DIR:?set FV_SSH_UNLOCK_SECRET_DIR to a memory-backed directory}"
+        target: /run/secrets
+        read_only: true
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /run/fv-ssh-unlock:rw,noexec,nosuid,nodev,mode=0700,uid=65532,gid=65532

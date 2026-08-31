@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: Apache-2.0
+
+[Unit]
+Description=FileVault SSH availability controller
+Documentation=https://github.com/shoon/fv-ssh-unlock
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=fv-ssh-unlock
+Group=fv-ssh-unlock
+UMask=0077
+Environment=FV_SSH_UNLOCK_DATA_DIR=/var/lib/fv-ssh-unlock
+# Add one LoadCredentialEncrypted= line per configured systemd:<name> reference.
+# LoadCredentialEncrypted=m4alpha:/etc/credstore.encrypted/m4alpha.cred
+# The daemon performs a reference-specific secure-provider preflight for every
+# device with automatic unlock enabled. Run `credentials providers` manually
+# inside this unit's environment when diagnosing credential delivery.
+ExecStart=/usr/local/bin/fv-ssh-unlock daemon --socket /run/fv-ssh-unlock/control.sock
+Restart=on-failure
+RestartSec=5s
+StateDirectory=fv-ssh-unlock
+StateDirectoryMode=0700
+RuntimeDirectory=fv-ssh-unlock
+RuntimeDirectoryMode=0700
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

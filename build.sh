@@ -5,9 +5,9 @@
 # build.sh - Build script for fv-ssh-unlock
 #
 # Builds the fv-ssh-unlock CLI (and, optionally, the mock test server) into the
-# dist/ directory. By default it produces a pure-Go binary that reads
-# credentials from environment variables. Pass --keyring to build with OS
-# keyring support instead.
+# dist/ directory. By default it produces a pure-Go binary with runtime and
+# externally managed file credential providers. Pass --keyring to also build
+# with OS keyring support.
 
 set -euo pipefail
 
@@ -31,7 +31,7 @@ Options:
   --clean     Remove the dist/ directory before building
   --help      Show this help
 
-With no options, builds dist/fv-ssh-unlock (env-var credential backend).
+With no options, builds dist/fv-ssh-unlock with runtime and file providers.
 USAGE
 }
 

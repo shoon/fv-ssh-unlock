@@ -24,7 +24,9 @@ password through the Mac's pre-boot SSH service, confirms that the unlock was
 accepted, and can then wait for normal macOS SSH to return.
 
 The client runs on macOS, Linux, or Windows. Nothing is installed on the target
-Mac, and no background service or cloud account is required.
+Mac and no cloud account is required. Use it interactively, or run its optional
+foreground daemon on an always-on Linux server, Raspberry Pi, Mac, or minimal
+container to recover explicitly authorized Macs after a power event.
 
 > [!IMPORTANT]
 > This works only with the FileVault SSH feature in **macOS 26 (Tahoe) or
@@ -57,14 +59,35 @@ Mac, and no background service or cloud account is required.
 | `scan` | Checks TCP/22 in an explicit IPv4 CIDR without sending credentials. | Find a pre-boot Mac that is no longer advertising Bonjour. |
 | `config add` | Saves a target's address, port, local user, and credential source. | Refer to known Macs by short names. |
 | `config list`, `show`, `remove` | Manages saved targets. | Use the same client for one Mac or a lab fleet. |
-| `status` | Reports `locked`, `unlocked`, or `unknown` without sending the FileVault password. | Check reachability and safely enroll an SSH host key. |
+| `credentials providers` | Reports which credential providers are built, available, and secure in the current environment. | Detect keyring, service-secret delivery, and future TPM2 support before configuring automation. |
+| `status` | Reports `locked`, `booted`, or `indeterminate` without sending the FileVault password. | Check reachability and safely enroll an SSH host key. |
 | `unlock` | Unlocks one, several, or all configured targets. | Recover remote Macs after restarts or power events. |
+| `daemon` | Continuously monitors explicit targets and applies per-device automatic-unlock policy. | Recover a homelab or hosted Mac fleet without an operator waiting at a terminal. |
+| `tui` | Shows managed-device state, recent events, and a reviewable candidate inbox. | Leave a lightweight dashboard running in tmux or connect to the daemon later. |
+| `healthcheck` | Checks the local daemon over its permission-restricted Unix socket. | Integrate with systemd, Docker, and infrastructure health gates without adding `curl`. |
+| `config export`, `apply` | Reads and atomically reconciles a non-secret JSON inventory. | Support idempotent Ansible and other configuration-management workflows. |
 | `completion` | Generates completion for Bash, Zsh, Fish, or PowerShell. | Makes repeated command-line use faster. |
 | `--help`, `--version` | Shows command help and build information. | Supports scripting and troubleshooting. |
 
-The client also provides SSH host-key pinning, OS-keyring and environment
-credential sources, configurable retries, public-key boot verification,
-IPv4/IPv6 target support, custom SSH ports, and terminal-safe diagnostics.
+The client also provides SSH host-key pinning, OS-keyring, externally managed
+credential-file, and runtime credential sources, configurable retries,
+public-key boot verification, IPv4/IPv6 target support, custom SSH ports, and
+terminal-safe diagnostics. Plaintext disk credential files fail closed unless
+the operator explicitly allows them for that invocation.
+
+Automatic unlock is off by default. The daemon never treats ping, TCP
+reachability, Bonjour, a hostname, or a generic password prompt as permission
+to release a credential. It requires explicit policy, a pinned host key, the
+definitive FileVault banner, a secure provider, and a durable one-attempt
+record. TCP reachability is used only to wake a password-free SSH probe quickly
+after an outage; it is not treated as proof of lock or boot state.
+
+For unattended operations, the daemon emits timestamped text logs at `info` by
+default or versioned, one-record-per-line JSON with `--log-format json`.
+systemd, Docker, Fluent Bit, or Vector can collect its standard output without
+adding a logging agent to the minimal container. Logs include operational
+metadata but never credential values, private-key bodies, authentication
+answers, or raw SSH/FileVault banners.
 
 ```mermaid
 flowchart LR
@@ -111,6 +134,13 @@ fv-ssh-unlock config add my-mac \
   --port 22
 ```
 
+Before choosing storage for unattended use, inspect the exact workstation,
+service, or container environment:
+
+```bash
+fv-ssh-unlock credentials providers
+```
+
 `my-mac` is a local alias. `unlockuser` is an example account name, not an
 account created by the tool. It must be a real local user that can unlock
 FileVault and use Remote Login. A standard, non-administrator account is
@@ -142,7 +172,7 @@ fv-ssh-unlock status my-mac \
   --identity ~/.ssh/id_ed25519
 ```
 
-Enrollment never sends the FileVault password. A result of `unknown` can be
+Enrollment never sends the FileVault password. A result of `indeterminate` can be
 normal if no public key proves that normal macOS is running.
 
 ### 4. Restart and unlock
@@ -193,9 +223,12 @@ Start with the guide that matches what you are trying to do:
 | [Use cases](docs/use-cases.md) | You want a task-based path for a known Mac, a new Mac, one target, or a fleet. |
 | [Discovery and scanning](docs/discovery-and-scanning.md) | You need to find booted Macs, scan a subnet, or understand banners and addresses. |
 | [Configuration and credentials](docs/configuration-and-credentials.md) | You need to manage devices, passwords, keyring entries, or configuration files. |
+| [Persistent daemon and TUI](docs/daemon-and-tui.md) | You want automatic outage recovery, periodic discovery, the terminal dashboard, or structured SIEM-ready logging. |
+| [Containers and services](docs/containers-and-services.md) | You want the scratch image, Docker Swarm secrets, standalone Compose, or systemd. |
+| [Infrastructure automation](docs/automation.md) | You want stable JSON/API integration, Ansible examples, or post-boot orchestration. |
 | [Status and unlocking](docs/unlocking-and-status.md) | You need result meanings, retry behavior, boot verification, or multi-device operation. |
 | [Security](docs/security.md) | You need the threat model, host-key workflow, privacy details, or secure-use guidance. |
-| [Troubleshooting](docs/troubleshooting.md) | A host key, connection, password, discovery, DNS, or verification check failed. |
+| [Troubleshooting](docs/troubleshooting.md) | A host key, connection, credential provider, discovery, DNS, or verification check failed. |
 | [CLI reference](docs/cli-reference.md) | You need commands, flags, environment-variable rules, or shell completion. |
 | [Development](docs/development.md) | You want to build, test, contribute, or use the mock FileVault SSH server. |
 

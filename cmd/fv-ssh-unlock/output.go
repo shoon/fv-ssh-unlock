@@ -11,7 +11,21 @@ import (
 )
 
 func terminalSafeInline(s string) string {
+	// Keep these explicit replacements before the general Unicode-control
+	// escaping below. Besides making the single-record invariant obvious, the
+	// standard-library sanitizer is recognized by static log-injection checks.
+	// The visible replacements match terminalSafe's existing rendering, so
+	// callers do not see a formatting change.
+	s = strings.ReplaceAll(s, "\n", `\u000A`)
+	s = strings.ReplaceAll(s, "\r", `\u000D`)
 	return terminalSafe(s, false)
+}
+
+func terminalSafeError(err error) string {
+	if err == nil {
+		return ""
+	}
+	return terminalSafeInline(err.Error())
 }
 
 func terminalSafeMultiline(s string) string {

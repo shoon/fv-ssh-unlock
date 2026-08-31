@@ -1,0 +1,133 @@
+# SPDX-License-Identifier: Apache-2.0
+
+---
+- name: Create controller group
+  ansible.builtin.group:
+    name: "{{ fv_ssh_unlock_service_group }}"
+    system: true
+
+- name: Create controller service account
+  ansible.builtin.user:
+    name: "{{ fv_ssh_unlock_service_user }}"
+    group: "{{ fv_ssh_unlock_service_group }}"
+    system: true
+    create_home: false
+    shell: /usr/sbin/nologin
+
+- name: Install verified controller binary
+  ansible.builtin.copy:
+    src: "{{ fv_ssh_unlock_binary_source }}"
+    dest: "{{ fv_ssh_unlock_binary_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+  notify: Restart fv-ssh-unlock
+
+- name: Install hardened systemd unit
+  ansible.builtin.copy:
+    src: "{{ fv_ssh_unlock_unit_source }}"
+    dest: /etc/systemd/system/fv-ssh-unlock.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart fv-ssh-unlock
+
+- name: Validate encrypted systemd credential references
+  ansible.builtin.assert:
+    that:
+      - item.name is match('^[A-Za-z0-9_.-]{1,128}$')
+      - item.encrypted_path is match('^/[A-Za-z0-9_./-]+$')
+    fail_msg: Credential names and absolute encrypted paths must contain only safe unit-file characters
+  loop: "{{ fv_ssh_unlock_systemd_credentials }}"
+  no_log: true
+
+- name: Validate the SSH identity credential reference
+  ansible.builtin.assert:
+    that:
+      - fv_ssh_unlock_identity_credential == '' or fv_ssh_unlock_identity_credential in (fv_ssh_unlock_systemd_credentials | map(attribute='name') | list)
+    fail_msg: fv_ssh_unlock_identity_credential must name one of fv_ssh_unlock_systemd_credentials
+
+- name: Create systemd drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/fv-ssh-unlock.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Attach encrypted systemd credentials
+  ansible.builtin.copy:
+    content: |
+      [Service]
+      {% for credential in fv_ssh_unlock_systemd_credentials %}
+      LoadCredentialEncrypted={{ credential.name }}:{{ credential.encrypted_path }}
+      {% endfor %}
+      {% if fv_ssh_unlock_identity_credential %}
+      ExecStart=
+      ExecStart={{ fv_ssh_unlock_binary_path }} daemon --socket /run/fv-ssh-unlock/control.sock --identity %d/{{ fv_ssh_unlock_identity_credential }}
+      {% endif %}
+    dest: /etc/systemd/system/fv-ssh-unlock.service.d/20-ansible-credentials.conf
+    owner: root
+    group: root
+    mode: "0644"
+  when: fv_ssh_unlock_systemd_credentials | length > 0
+  notify: Restart fv-ssh-unlock
+
+- name: Remove the role-managed credential drop-in when unused
+  ansible.builtin.file:
+    path: /etc/systemd/system/fv-ssh-unlock.service.d/20-ansible-credentials.conf
+    state: absent
+  when: fv_ssh_unlock_systemd_credentials | length == 0
+  notify: Restart fv-ssh-unlock
+
+- name: Create private controller state directory
+  ansible.builtin.file:
+    path: /var/lib/fv-ssh-unlock
+    state: directory
+    owner: "{{ fv_ssh_unlock_service_user }}"
+    group: "{{ fv_ssh_unlock_service_group }}"
+    mode: "0700"
+
+- name: Install independently verified SSH host keys
+  ansible.builtin.copy:
+    src: "{{ fv_ssh_unlock_known_hosts_source }}"
+    dest: /var/lib/fv-ssh-unlock/known_hosts
+    owner: "{{ fv_ssh_unlock_service_user }}"
+    group: "{{ fv_ssh_unlock_service_group }}"
+    mode: "0600"
+  when: fv_ssh_unlock_known_hosts_source is not none
+  notify: Restart fv-ssh-unlock
+
+- name: Stage declarative non-secret device inventory
+  ansible.builtin.copy:
+    content: "{{ fv_ssh_unlock_devices | to_nice_json }}\n"
+    dest: /var/lib/fv-ssh-unlock/ansible-devices.json
+    owner: "{{ fv_ssh_unlock_service_user }}"
+    group: "{{ fv_ssh_unlock_service_group }}"
+    mode: "0600"
+  when: fv_ssh_unlock_devices is not none
+
+- name: Reconcile declarative device inventory
+  become: true
+  become_user: "{{ fv_ssh_unlock_service_user }}"
+  ansible.builtin.command:
+    argv:
+      - "{{ fv_ssh_unlock_binary_path }}"
+      - --data-dir
+      - /var/lib/fv-ssh-unlock
+      - config
+      - apply
+      - --file
+      - /var/lib/fv-ssh-unlock/ansible-devices.json
+      - --json
+  when: fv_ssh_unlock_devices is not none
+  register: fv_ssh_unlock_apply
+  changed_when: (fv_ssh_unlock_apply.stdout | from_json).changed
+  notify: Restart fv-ssh-unlock
+
+- name: Enable and start controller
+  ansible.builtin.systemd_service:
+    name: fv-ssh-unlock.service
+    enabled: true
+    state: started
+    daemon_reload: true

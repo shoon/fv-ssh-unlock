@@ -45,6 +45,84 @@ func TestAnalyzePromptLockedCorrectPassword(t *testing.T) {
 	}
 }
 
+func TestUnlockReturnsImmediatelyWhenServerHoldsAfterSuccess(t *testing.T) {
+	hold := make(chan struct{})
+	t.Cleanup(func() { close(hold) })
+	ts := startTestServer(t, testServerConfig{
+		password:         "s3cret",
+		holdAfterSuccess: hold,
+	})
+	c := newClient(ts.fixedHostKey())
+
+	started := time.Now()
+	result := Unlock(context.Background(), c, &mockStore{pw: "s3cret"}, ts.addr, "user", "credential", "", 2*time.Second)
+	if result.Error != nil || result.Status != StatusUnlocked {
+		t.Fatalf("unlock result = %+v", result)
+	}
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		t.Fatalf("unlock waited %v for a server that held the connection after success", elapsed)
+	}
+	if !ts.receivedPassword("s3cret") {
+		t.Fatal("server never received the password")
+	}
+}
+
+func TestAnalyzePromptMarksTimeoutAfterPasswordAsUnacknowledged(t *testing.T) {
+	hold := make(chan struct{})
+	t.Cleanup(func() { close(hold) })
+	ts := startTestServer(t, testServerConfig{
+		password:         "s3cret",
+		successMsg:       "server is transitioning without an acknowledgement",
+		holdAfterSuccess: hold,
+	})
+	c := newClient(ts.fixedHostKey())
+	c.DialTimeout = 100 * time.Millisecond
+
+	status, _, err := c.AnalyzePrompt(context.Background(), ts.addr, "user", "s3cret", "")
+	if status != StatusUnknown || !errors.Is(err, ErrUnlockOutcomeUnknown) {
+		t.Fatalf("status=%v err=%v, want unknown unacknowledged outcome", status, err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error %v does not preserve the transport deadline", err)
+	}
+	if !ts.receivedPassword("s3cret") {
+		t.Fatal("server never received the password")
+	}
+}
+
+func TestWatchSSHServiceTransitionDetectsTCPDown(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	passwordAnswered := make(chan struct{})
+	detected := make(chan struct{})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	go watchSSHServiceTransition(ctx, address, passwordAnswered, 10*time.Millisecond, 10*time.Millisecond, func() {
+		close(detected)
+	})
+
+	// The watcher's baseline connection proves that this endpoint accepts a
+	// separate TCP connection before password submission.
+	baseline, err := listener.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = baseline.Close()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	close(passwordAnswered)
+
+	select {
+	case <-detected:
+	case <-ctx.Done():
+		t.Fatal("TCP service transition was not detected")
+	}
+}
+
 func TestAnalyzePromptLockedWrongPassword(t *testing.T) {
 	ts := startTestServer(t, testServerConfig{password: "s3cret"})
 	c := newClient(ts.fixedHostKey())

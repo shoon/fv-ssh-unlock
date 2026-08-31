@@ -1,6 +1,6 @@
 # Discovery and scanning
 
-[Documentation home](index.md) | [Use cases](use-cases.md) | [Troubleshooting](troubleshooting.md)
+[Documentation home](index.md) | [Persistent daemon and TUI](daemon-and-tui.md) | [Use cases](use-cases.md) | [Troubleshooting](troubleshooting.md)
 
 `discover` and `scan` find network candidates without using credentials. They
 use different mechanisms and answer different questions.
@@ -9,6 +9,7 @@ use different mechanisms and answer different questions.
 
 - [Choose the right network check](#choose-the-right-network-check)
 - [Bonjour discovery](#bonjour-discovery)
+- [Persistent candidate discovery](#persistent-candidate-discovery)
 - [Why a locked Mac can disappear](#why-a-locked-mac-can-disappear)
 - [Names, aliases, and addresses](#names-aliases-and-addresses)
 - [Active IPv4 scanning](#active-ipv4-scanning)
@@ -24,7 +25,7 @@ use different mechanisms and answer different questions.
 | Resolve `my-mac.local` | Performs an mDNS hostname lookup. | The hostname currently maps to an address. It says nothing about a service advertisement. |
 | Test TCP/22 | Uses `nc`, `Test-NetConnection`, or another connection check. | Something accepts connections at the address and port. It does not identify FileVault. |
 | `scan` | Connects to TCP/22 in an explicit IPv4 CIDR and performs a password-free SSH handshake. | Which addresses answer SSH, their public host-key fingerprints, and limited banner evidence. |
-| `status` | Connects to one configured target and verifies its pinned SSH key. | A locked banner, accepted public key, or conservative `unknown` state. |
+| `status` | Connects to one configured target and verifies its pinned SSH key. | A locked banner, accepted public key, or conservative `indeterminate` state. |
 
 ## Bonjour discovery
 
@@ -62,6 +63,57 @@ dns-sd -B _ssh._tcp local.
 ```
 
 Increase `--timeout` for intermittent responses.
+
+## Persistent candidate discovery
+
+The foreground `daemon` can repeat both discovery methods and maintain a
+durable candidate inbox for the TUI. Bonjour runs once at startup and every
+five minutes by default:
+
+```bash
+fv-ssh-unlock daemon --discover-interval 5m --discover-timeout 8s
+```
+
+Use `--discover-interface eth0` to restrict multicast browsing or
+`--discover-interval 0` to disable it. Bonjour results normally have names and
+addresses but no SSH fingerprint, so they enter the inbox as `discovered` and
+cannot be enrolled yet.
+
+Periodic active scanning is disabled until an operator supplies an authorized
+CIDR. It runs once at daemon startup and then every 15 minutes by default:
+
+```bash
+fv-ssh-unlock daemon \
+  --scan-cidr 192.168.1.0/24 \
+  --scan-interval 15m \
+  --scan-timeout 1.5s \
+  --scan-concurrency 32
+```
+
+The active probe collects the public SSH host-key fingerprint without loading
+an identity or answering the authentication challenge. A candidate with a
+fingerprint becomes `identity_pending`, ready for independent verification in
+the TUI:
+
+```bash
+fv-ssh-unlock tui
+```
+
+The inbox combines observations primarily by SHA-256 fingerprint. Names and
+addresses remain untrusted hints; the same fingerprint can follow an address
+change, while different fingerprints at a reused address remain separate.
+Non-ignored candidate observations expire after seven days. An ignored
+candidate remains durable until restored through the local API.
+
+Persistent discovery does **not** automatically accept a host key, configure a
+device, select an unlock user, retrieve a credential, or enable automatic
+unlock. Pressing `a` in the TUI still requires the operator to obtain the
+fingerprint locally from the Mac and type the complete exact value. Only then
+does the daemon reconnect expecting that fingerprint and enroll it.
+
+Read [Persistent daemon and terminal dashboard](daemon-and-tui.md) for the
+complete candidate lifecycle, enrollment ceremony, active-scan authorization,
+and TUI controls.
 
 ## Why a locked Mac can disappear
 
@@ -182,11 +234,13 @@ does not claim to distinguish pre-boot from booted password-only SSH.
 Scanning is IPv4-only because exhaustive IPv6 subnet scanning is not
 practical. The tool caps combined input at 4096 addresses.
 
-`scan` never reads the OS keyring or environment credentials, loads private
-identity keys, sends a password, enrolls a host key, stores a discovered key,
-or changes device configuration. It does make connection attempts that may be
-logged or trigger network monitoring. Scan only networks you own or are
-authorized to test.
+The one-shot `scan` command never reads the OS keyring or environment
+credentials, loads private identity keys, sends a password, enrolls a host key,
+stores a discovered key, or changes device configuration. The daemon's periodic
+scanner stores only candidate observations and fingerprints in its review
+inbox; it still does not trust or enroll them. Both forms make connection
+attempts that may be logged or trigger network monitoring. Scan only networks
+you own or are authorized to test.
 
 The default synthetic username worked with the observed FileVault server. If a
 server suppresses the authentication challenge for unknown users, pass the
@@ -200,4 +254,4 @@ This still sends no password or identity key.
 
 ---
 
-[Documentation home](index.md) | [Use cases](use-cases.md) | [Troubleshooting](troubleshooting.md)
+[Documentation home](index.md) | [Persistent daemon and TUI](daemon-and-tui.md) | [Use cases](use-cases.md) | [Troubleshooting](troubleshooting.md)

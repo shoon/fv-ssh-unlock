@@ -66,7 +66,7 @@ The build script provides the common variants on macOS, Linux, or a Windows
 Bash environment:
 
 ```bash
-./build.sh            # environment-variable credential build
+./build.sh            # runtime and external-file providers
 ./build.sh --keyring  # OS-keyring build
 ./build.sh --mock     # client and local mock SSH server
 ```
@@ -79,9 +79,9 @@ Binaries are written to `dist/`.
 go install github.com/shoon/fv-ssh-unlock/cmd/fv-ssh-unlock@latest
 ```
 
-`go install` produces the environment-variable credential build because build
-tags cannot be supplied in that module path. Use a release binary or build with
-`-tags keyring` if you want OS-keyring storage.
+`go install` produces a binary with runtime and external-file providers because
+build tags cannot be supplied in that module path. Use a release binary or
+build with `-tags keyring` if you also want OS-keyring storage.
 
 ## Verify a release download
 
@@ -233,7 +233,7 @@ Before deleting the configuration, use a keyring-enabled binary to remove the
 configured devices so their keyring entries are cleaned up:
 
 ```bash
-fv-ssh-unlock config remove
+fv-ssh-unlock config remove --all
 ```
 
 Then delete the client binary. If you no longer need any pinned keys or

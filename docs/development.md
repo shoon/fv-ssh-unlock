@@ -22,6 +22,9 @@ SSH server, and known platform limitations.
 | --- | --- |
 | `cmd/fv-ssh-unlock` | CLI entry point, network discovery, scanning, host-key management, and command tests. |
 | `pkg/fvcore` | Core FileVault SSH protocol and shared behavior. |
+| `internal/monitor` | Persistent policy state machine, scheduling, backoff, latches, and atomic runtime state. |
+| `internal/candidates` | Untrusted discovery inbox, fingerprint-first deduplication, review lifecycle, and atomic state. |
+| `internal/control` | Local HTTP transport restricted to a permission-controlled Unix socket. |
 | `tools/mock-fv-ssh-server` | Separate development-only mock server module. |
 | `testdata` | Redacted protocol fixtures used by tests. |
 | `.github/workflows` | CI, CodeQL, dependency review, and release automation. |
@@ -32,7 +35,7 @@ development.
 
 ## Build the client
 
-Build the environment-variable credential variant:
+Build with runtime and external-file credential providers:
 
 ```bash
 go build ./...
@@ -67,6 +70,11 @@ go test -race ./...
 govulncheck ./...
 govulncheck -tags keyring ./...
 ```
+
+The race suite includes dynamic device enrollment during daemon shutdown,
+candidate ingestion, durable-state transitions, and concurrent host-key
+enrollment. Socket and TCP integration tests need permission to bind local
+endpoints in restricted development sandboxes.
 
 Validate the separate mock-server module too:
 
@@ -142,7 +150,7 @@ MOCK_FV_PASSWORD='test-only-secret' \
 ```
 
 The SSH version is configurable test data, not a classification signal. With
-this variant, `status` should report `unknown` after key enrollment, while
+this variant, `status` should report `indeterminate` after key enrollment, while
 `unlock --no-verify` should succeed. This matches the client's intended
 separation between password-free evidence and an operator-requested unlock.
 
@@ -166,6 +174,23 @@ FileVault constraint that the data volume and normal user's `authorized_keys`
 are not yet available.
 
 The mock does not advertise Bonjour, provide a shell, or emulate macOS itself.
+
+For daemon/API testing, use a temporary absolute data directory and disable
+network discovery when it is not under test:
+
+```bash
+test_dir="$(mktemp -d)"
+FV_SSH_UNLOCK_DATA_DIR="$test_dir" \
+  ./fv-ssh-unlock daemon --discover-interval 0 \
+  --socket "$test_dir/control.sock"
+
+FV_SSH_UNLOCK_DATA_DIR="$test_dir" \
+  ./fv-ssh-unlock healthcheck --socket "$test_dir/control.sock"
+```
+
+Use synthetic credentials only in automated tests. Tests assert that
+credential values do not appear in monitor state, candidate state, API
+responses, or operator event text.
 
 ## Limitations
 
@@ -196,6 +221,12 @@ as described in [SECURITY.md](../SECURITY.md).
 Releases are built by GitHub Actions for macOS, Linux, and Windows on AMD64 and
 ARM64. The workflow publishes checksums, keyless Sigstore verification
 material, and SPDX SBOMs with each archive.
+
+The production container is built separately as a statically linked Linux
+binary in a `scratch` final stage. Container validation must inspect the final
+filesystem, run both AMD64 and ARM64 variants, verify non-root/read-only
+operation, exercise the built-in health check, and confirm that no credential
+appears in layers, history, SBOM, provenance, or logs.
 
 ---
 

@@ -44,6 +44,12 @@ const (
 	// be before it is ignored, so a trivial value (e.g. "a") cannot be used to
 	// forge a successful unlock.
 	minCustomSuccessLen = 8
+	// After submitting the password, a transition watcher uses fresh TCP
+	// connections to notice the pre-boot SSH service disappearing. Two
+	// consecutive failures avoid reacting to a single dropped packet.
+	transitionProbeInterval = 500 * time.Millisecond
+	transitionProbeTimeout  = 400 * time.Millisecond
+	transitionProbeFailures = 2
 )
 
 // normalizeBanner lowercases text and collapses all whitespace runs to single
@@ -165,10 +171,13 @@ func (b *bannerBuf) String() string {
 type authTrace struct {
 	mu sync.Mutex
 
-	banner           bannerBuf
-	passwordPrompted bool
-	passwordAnswered bool
-	successAfterAuth bool
+	banner                      bannerBuf
+	postAuth                    strings.Builder
+	passwordAnsweredSignal      chan struct{}
+	passwordPrompted            bool
+	passwordAnswered            bool
+	successAfterAuth            bool
+	transportTransitionObserved bool
 }
 
 func (t *authTrace) addText(s string) {
@@ -187,16 +196,24 @@ func (t *authTrace) recordPasswordPrompt(answer bool) error {
 	}
 	t.passwordPrompted = true
 	t.passwordAnswered = answer
+	if answer && t.passwordAnsweredSignal != nil {
+		close(t.passwordAnsweredSignal)
+	}
 	return nil
 }
 
-func (t *authTrace) recordResponseText(s, successMsg string) {
+func (t *authTrace) recordResponseText(s, successMsg string) bool {
 	t.addText(s)
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.passwordAnswered && successSeen(s, successMsg) {
-		t.successAfterAuth = true
+	if t.passwordAnswered {
+		t.postAuth.WriteString(s)
+		t.postAuth.WriteByte('\n')
+		if successSeen(t.postAuth.String(), successMsg) {
+			t.successAfterAuth = true
+		}
 	}
+	return t.successAfterAuth
 }
 
 func (t *authTrace) state() (prompted, answered, succeeded bool) {
@@ -205,9 +222,33 @@ func (t *authTrace) state() (prompted, answered, succeeded bool) {
 	return t.passwordPrompted, t.passwordAnswered, t.successAfterAuth
 }
 
+func (t *authTrace) markTransportTransition() {
+	t.mu.Lock()
+	t.transportTransitionObserved = true
+	t.mu.Unlock()
+}
+
+func (t *authTrace) transportTransitionSeen() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.transportTransitionObserved
+}
+
 // errStatusProbe is returned by the status-probe keyboard-interactive callback
 // to abort authentication without sending the password.
 var errStatusProbe = errors.New("status probe: not answering")
+
+// errUnlockSucceeded stops the SSH authentication handshake as soon as the
+// post-password success banner arrives. The real pre-boot server may keep the
+// connection open after this authoritative result, so waiting for it to close
+// would turn a successful unlock into a timeout.
+var errUnlockSucceeded = errors.New("unlock succeeded")
+
+// ErrUnlockOutcomeUnknown means the password was submitted to the trusted
+// server, but the connection ended or timed out before a success or rejection
+// response was observed. Callers should probe for normal macOS without sending
+// the password again before deciding whether to retry.
+var ErrUnlockOutcomeUnknown = errors.New("unlock outcome was not acknowledged")
 
 // ErrIndeterminate signals that the device state could not be determined
 // without authenticating (a password prompt was reached, but no locked banner
@@ -224,7 +265,9 @@ func (r *RealSSHClient) clientConfig(user, password, successMsg string, answerPa
 	kbd := ssh.KeyboardInteractive(func(_, instruction string, questions []string, echos []bool) ([]string, error) {
 		// Info-only request (e.g. the success banner); nothing to answer.
 		if len(questions) == 0 {
-			trace.recordResponseText(instruction, successMsg)
+			if trace.recordResponseText(instruction, successMsg) {
+				return nil, errUnlockSucceeded
+			}
 			return nil, nil
 		}
 		trace.addText(instruction)
@@ -258,7 +301,9 @@ func (r *RealSSHClient) clientConfig(user, password, successMsg string, answerPa
 		Auth:            auth,
 		HostKeyCallback: r.hostKeyCallback(),
 		BannerCallback: func(msg string) error {
-			trace.recordResponseText(msg, successMsg)
+			if trace.recordResponseText(msg, successMsg) {
+				return errUnlockSucceeded
+			}
 			return nil
 		},
 		Timeout: r.dialTimeout(),
@@ -269,14 +314,14 @@ func (r *RealSSHClient) clientConfig(user, password, successMsg string, answerPa
 // keyboard-interactive, and returns the resulting DeviceStatus, the decrypted
 // banner text seen, and any error.
 func (r *RealSSHClient) AnalyzePrompt(ctx context.Context, host, user, password, successMsg string) (DeviceStatus, string, error) {
-	trace := &authTrace{}
+	trace := &authTrace{passwordAnsweredSignal: make(chan struct{})}
 	cfg := r.clientConfig(user, password, successMsg, true, trace)
 
-	sshConn, chans, reqs, err := r.handshake(ctx, host, cfg)
+	sshConn, chans, reqs, err := r.handshake(ctx, host, cfg, trace)
 	out := trace.output()
-	promptedForPassword, _, successAfterAuth := trace.state()
+	promptedForPassword, passwordAnswered, successAfterAuth := trace.state()
 	if err != nil {
-		return r.classifyHandshakeErr(host, out, promptedForPassword, successAfterAuth, err)
+		return r.classifyHandshakeErr(host, out, promptedForPassword, passwordAnswered, successAfterAuth, trace.transportTransitionSeen(), err)
 	}
 
 	// A completed handshake means we reached a fully booted sshd. The machine
@@ -300,7 +345,7 @@ func (r *RealSSHClient) ProbeStatus(ctx context.Context, host, user string) (Dev
 	trace := &authTrace{}
 	cfg := r.clientConfig(user, "", "", false, trace)
 
-	sshConn, chans, reqs, err := r.handshake(ctx, host, cfg)
+	sshConn, chans, reqs, err := r.handshake(ctx, host, cfg, nil)
 	out := trace.output()
 	promptedForPassword, _, _ := trace.state()
 	if err != nil {
@@ -334,7 +379,7 @@ func (r *RealSSHClient) ProbeStatus(ctx context.Context, host, user string) (Dev
 
 // handshake dials host and performs the SSH handshake, honoring ctx deadlines
 // on both the dial and the handshake so a silent host can never wedge the call.
-func (r *RealSSHClient) handshake(ctx context.Context, host string, cfg *ssh.ClientConfig) (ssh.Conn, <-chan ssh.NewChannel, <-chan *ssh.Request, error) {
+func (r *RealSSHClient) handshake(ctx context.Context, host string, cfg *ssh.ClientConfig, trace *authTrace) (ssh.Conn, <-chan ssh.NewChannel, <-chan *ssh.Request, error) {
 	r.logf("dialing %q", host)
 	timeout := r.dialTimeout()
 	d := &net.Dialer{Timeout: timeout}
@@ -364,6 +409,15 @@ func (r *RealSSHClient) handshake(ctx context.Context, host string, cfg *ssh.Cli
 		case <-stop:
 		}
 	}()
+	if trace != nil && trace.passwordAnsweredSignal != nil {
+		transitionCtx, cancelTransition := context.WithCancel(ctx)
+		defer cancelTransition()
+		go watchSSHServiceTransition(transitionCtx, host, trace.passwordAnsweredSignal, transitionProbeInterval, transitionProbeTimeout, func() {
+			trace.markTransportTransition()
+			r.logf("SSH service stopped accepting connections after password submission; switching to boot verification")
+			_ = conn.Close()
+		})
+	}
 
 	sshConn, chans, reqs, err := ssh.NewClientConn(conn, host, cfg)
 	if err != nil {
@@ -381,18 +435,26 @@ func (r *RealSSHClient) handshake(ctx context.Context, host string, cfg *ssh.Cli
 // classifyHandshakeErr turns a failed handshake into a DeviceStatus using the
 // decrypted banner text and typed error inspection, not string matching on
 // err.Error().
-func (r *RealSSHClient) classifyHandshakeErr(host, out string, promptedForPassword, successAfterAuth bool, err error) (DeviceStatus, string, error) {
+func (r *RealSSHClient) classifyHandshakeErr(host, out string, promptedForPassword, passwordAnswered, successAfterAuth, transportTransitionObserved bool, err error) (DeviceStatus, string, error) {
 	if isHostKeyError(err) {
 		return StatusUnknown, out, fmt.Errorf("%w for %s: %v", ErrHostKeyMismatch, host, err)
 	}
-	if de := dialError(err); de != nil {
-		return StatusUnknown, out, de
-	}
 	// The success banner is the authoritative positive signal, even though the
-	// server then fails auth and disconnects.
+	// server then fails auth, disconnects, or keeps the connection open. It wins
+	// over a later transport timeout or cancellation because acceptance already
+	// happened. Host-key failures still take precedence above.
 	if successAfterAuth {
 		r.logf("success banner detected; unlock succeeded")
 		return StatusUnlocked, out, nil
+	}
+	if passwordAnswered && transportTransitionObserved {
+		return StatusUnknown, out, fmt.Errorf("%w: SSH service became unavailable after password submission", ErrUnlockOutcomeUnknown)
+	}
+	if de := dialError(err); de != nil {
+		if passwordAnswered {
+			return StatusUnknown, out, fmt.Errorf("%w: %w", ErrUnlockOutcomeUnknown, de)
+		}
+		return StatusUnknown, out, de
 	}
 	// We answered the password prompt but did not see the success banner: the
 	// device is still locked (wrong password, or authentication ended).
@@ -401,6 +463,60 @@ func (r *RealSSHClient) classifyHandshakeErr(host, out string, promptedForPasswo
 		return StatusLocked, out, ErrAuthFailed
 	}
 	return StatusUnknown, out, err
+}
+
+// watchSSHServiceTransition observes only TCP reachability; it never sends a
+// credential, performs host-key enrollment, or treats reachability as proof of
+// success. Its sole purpose is to stop waiting on a stale pre-boot connection
+// once fresh connections show that the SSH service has gone away. The caller
+// must still use an authenticated public-key probe to prove normal macOS booted.
+func watchSSHServiceTransition(ctx context.Context, host string, passwordAnswered <-chan struct{}, interval, timeout time.Duration, onDown func()) {
+	// Establish that this endpoint accepts a separate TCP connection before the
+	// password is submitted. Some constrained SSH services may allow the active
+	// authentication connection but reject concurrent connections; without this
+	// baseline, that behavior could be mistaken for a reboot transition.
+	baselineReachable := sshEndpointReachable(ctx, host, timeout)
+	select {
+	case <-ctx.Done():
+		return
+	case <-passwordAnswered:
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	failures := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		if sshEndpointReachable(ctx, host, timeout) {
+			baselineReachable = true
+			failures = 0
+			continue
+		}
+		if !baselineReachable {
+			continue
+		}
+		failures++
+		if failures >= transitionProbeFailures {
+			onDown()
+			return
+		}
+	}
+}
+
+func sshEndpointReachable(ctx context.Context, host string, timeout time.Duration) bool {
+	probeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	probe, err := (&net.Dialer{}).DialContext(probeCtx, "tcp", host)
+	if err != nil {
+		return false
+	}
+	_ = probe.Close()
+	return true
 }
 
 func isPasswordPrompt(question string) bool {

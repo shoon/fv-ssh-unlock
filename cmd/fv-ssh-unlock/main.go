@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -26,6 +28,7 @@ import (
 )
 
 var version = "dev"
+var dataDirOverride string
 
 const (
 	defaultSuccessMessage = "System successfully unlocked.\r\nYou may now use SSH to authenticate normally.\r\n\r\n"
@@ -40,7 +43,7 @@ can be unlocked over SSH after a restart. Notes on observed server behavior:
      use SSH keys.
   2. Some versions show a FileVault explanation before the hidden Password:
      prompt; others show only Password:. Either form can be unlocked, but a
-     password-free status check is unknown when the explanation is absent.
+     password-free status check is indeterminate when the explanation is absent.
   3. A successful unlock prints the success message and then disconnects.
   4. Bonjour discovery normally works while macOS is booted. FileVault pre-boot
      may answer TCP/22 without advertising Bonjour, so discover is not a port
@@ -56,9 +59,13 @@ Examples:
   fv-ssh-unlock config add my-mac --host 192.0.2.10 --user unlockuser --port 22
   fv-ssh-unlock status my-mac --identity ~/.ssh/id_ed25519
   fv-ssh-unlock unlock my-mac --identity ~/.ssh/id_ed25519
-  fv-ssh-unlock unlock
+  fv-ssh-unlock unlock --all
+  fv-ssh-unlock credentials providers
   fv-ssh-unlock discover
-  fv-ssh-unlock scan --cidr 192.168.1.0/24`
+  fv-ssh-unlock scan --cidr 192.168.1.0/24
+  fv-ssh-unlock daemon --once --identity ~/.ssh/id_ed25519
+  fv-ssh-unlock daemon --identity ~/.ssh/id_ed25519
+  fv-ssh-unlock tui`
 	addLongHelp = `Add a device to the local configuration file. Either the [name]
 argument or --host is required. If name is omitted, the host value is used.
 
@@ -67,25 +74,35 @@ the Mac. Prefer a DHCP reservation (static lease). A manually assigned static
 address is a fallback that must be tested for conflicts and pre-boot behavior.
 Bonjour discovery and .local names are convenient while macOS is booted, but
 FileVault pre-boot may not advertise Bonjour; do not rely on discover to recover
-an address after restart.`
+an address after restart.
+
+Credential source "auto" offers the OS keyring only when it appears usable and
+otherwise selects runtime input. Source "file" reads an externally managed
+absolute path or portable systemd:<name> reference. Plaintext disk files are
+refused unless the action-scoped --allow-unsafe-credential-storage flag is
+supplied.`
 	unlockLongHelp = `Unlock configured devices by name using a credential from the
-environment, OS keyring, or an interactive prompt. With no names, unlock every
-configured device.
+environment, OS keyring, externally managed file, or an interactive prompt.
+Specify one or more device names, or use --all explicitly. Plaintext disk
+credential files are refused unless --allow-unsafe-credential-storage is
+supplied for this invocation; the override is never saved.
 
 The FileVault explanation may be absent on recent macOS versions; an exact
 hidden Password: prompt is still supported. SUCCESS means the trusted server
 accepted the password. VERIFIED additionally requires normal macOS SSH to
-accept a public key from ssh-agent or --identity. Use --identity for predictable
-post-boot verification when no suitable key is loaded in ssh-agent.`
+accept a public key from ssh-agent, a standard ~/.ssh identity, or --identity.
+Use --identity to select a nonstandard unencrypted key. After password
+submission, the client watches the SSH endpoint for the pre-boot-to-macOS
+network transition; it does not depend on ICMP/ping.`
 	statusLongHelp = `Probe configured devices without retrieving or transmitting the
 unlock password. A FileVault explanation proves locked; successful public-key
 authentication proves normal macOS has booted.
 
 Some FileVault pre-boot versions show only Password:, which is indistinguishable
 from a password-only booted SSH server without sending a secret. In that case
-unknown is the safe, expected result. Load a key into ssh-agent or use --identity
-to prove the booted state.`
-	indeterminateStatusText = "unknown (reachable; prompt-only pre-boot or password-only SSH; use ssh-agent/--identity to prove booted)"
+indeterminate is the safe, expected result. The command tries ssh-agent and
+standard ~/.ssh identities automatically; use --identity to select another key.`
+	indeterminateStatusText = "indeterminate (SSH reachable; no proof of FileVault pre-boot or booted macOS)"
 )
 
 func main() {
@@ -105,6 +122,7 @@ func main() {
 	// We handle our own messaging; don't let Cobra print usage on every error.
 	rootCmd.SilenceUsage = true
 	rootCmd.SetContext(ctx)
+	rootCmd.PersistentFlags().StringVar(&dataDirOverride, "data-dir", "", "Configuration and state directory (or FV_SSH_UNLOCK_DATA_DIR; default ~/.fv-ssh-unlock)")
 
 	cfgCmd := &cobra.Command{
 		Use:   "config",
@@ -119,6 +137,10 @@ func main() {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			host, _ := cmd.Flags().GetString("host")
 			user, _ := cmd.Flags().GetString("user")
+			requestedCredentialSource, _ := cmd.Flags().GetString("credential-source")
+			credentialFile, _ := cmd.Flags().GetString("credential-file")
+			allowUnsafeStorage, _ := cmd.Flags().GetBool("allow-unsafe-credential-storage")
+			autoUnlock, _ := cmd.Flags().GetBool("auto-unlock")
 
 			if user == "" {
 				return fmt.Errorf("user is required")
@@ -167,49 +189,141 @@ func main() {
 				}
 			}
 
-			credentialSource := "runtime"
-			credentialStored := false
-			d := config.Device{Name: name, Host: host, User: user, Port: port, Cred: cred, CredentialSource: credentialSource, SuccessMessage: successMsg}
-			if err := config.ValidateDevice(d); err != nil {
+			requestedCredentialSource = strings.ToLower(strings.TrimSpace(requestedCredentialSource))
+			if requestedCredentialSource == "" {
+				requestedCredentialSource = "auto"
+			}
+			switch requestedCredentialSource {
+			case "auto", credentials.ProviderRuntime, credentials.ProviderKeyring, credentials.ProviderFile:
+			default:
+				return fmt.Errorf("--credential-source must be auto, runtime, keyring, or file")
+			}
+			if requestedCredentialSource == credentials.ProviderFile && credentialFile == "" {
+				return fmt.Errorf("--credential-file is required with --credential-source file")
+			}
+			if requestedCredentialSource != credentials.ProviderFile && credentialFile != "" {
+				return fmt.Errorf("--credential-file requires --credential-source file")
+			}
+			preflight := config.Device{
+				Name:             name,
+				Host:             host,
+				User:             user,
+				Port:             port,
+				Cred:             cred,
+				CredentialSource: credentials.ProviderRuntime,
+				SuccessMessage:   successMsg,
+			}
+			if err := config.ValidateDevice(preflight); err != nil {
 				return err
 			}
-			if credentials.CanStore() {
-				fmt.Print("Store password in OS keychain? [y/N]: ")
-				confirmed, err := readYes(cmd.InOrStdin())
+
+			registry := credentials.NewRegistry(credentials.Options{AllowUnsafeCredentialStorage: allowUnsafeStorage})
+			credentialSource := credentials.ProviderRuntime
+			credentialRef := ""
+			var storedProvider credentials.Provider
+			storeInKeyring := func() error {
+				provider, err := registry.Provider(credentials.ProviderKeyring)
 				if err != nil {
-					return fmt.Errorf("read confirmation: %w", err)
+					return err
 				}
-				if confirmed {
-					fmt.Printf("Enter password for %s@%s: ", terminalSafeInline(user), terminalSafeInline(host))
-					password, err := credentials.ReadPassword()
-					if err != nil {
-						return fmt.Errorf("error reading password: %w", err)
-					}
-					if password == "" {
-						return fmt.Errorf("password must not be empty")
-					}
-					if err := credentials.Set(cred, password); err != nil {
-						return fmt.Errorf("store password in keychain: %w", err)
-					}
-					credentialSource = "keyring"
-					credentialStored = true
-				} else {
-					fmt.Println("Password not stored. It will be read from the environment or prompted at unlock time.")
+				report := provider.Report()
+				if !report.Available {
+					return fmt.Errorf("keyring credential provider is unavailable: %s", report.Details)
 				}
-			} else {
-				fmt.Printf("Password will be read from %s or prompted at unlock time.\n", terminalSafeInline(envName))
+				fmt.Printf("Enter password for %s@%s: ", terminalSafeInline(user), terminalSafeInline(host))
+				password, err := credentials.ReadPassword()
+				if err != nil {
+					return fmt.Errorf("error reading password: %w", err)
+				}
+				if password == "" {
+					return fmt.Errorf("password must not be empty")
+				}
+				if err := provider.Store(cred, password); err != nil {
+					return fmt.Errorf("store password in keychain: %w", err)
+				}
+				credentialSource = credentials.ProviderKeyring
+				storedProvider = provider
+				return nil
 			}
 
-			d.CredentialSource = credentialSource
+			switch requestedCredentialSource {
+			case credentials.ProviderRuntime:
+				fmt.Printf("Password will be read from %s or prompted at unlock time.\n", terminalSafeInline(envName))
+			case credentials.ProviderKeyring:
+				if err := storeInKeyring(); err != nil {
+					return err
+				}
+			case credentials.ProviderFile:
+				normalizedReference, err := credentials.NormalizeFileReference(credentialFile)
+				if err != nil {
+					return fmt.Errorf("invalid --credential-file: %w", err)
+				}
+				provider, err := registry.Provider(credentials.ProviderFile)
+				if err != nil {
+					return err
+				}
+				assessment := provider.Assess(normalizedReference)
+				if assessment.Available && !assessment.Secure && !allowUnsafeStorage {
+					return fmt.Errorf("%w: %s; provision the file through a verified service credential mount or pass --allow-unsafe-credential-storage for this command",
+						credentials.ErrUnsafeCredentialStorage, assessment.Details)
+				}
+				if !assessment.Available {
+					fmt.Fprintf(os.Stderr, "warning: credential file is not currently available and cannot be assessed: %s; it will be verified when unlock reads it\n", terminalSafeInline(assessment.Details))
+				} else if !assessment.Secure {
+					fmt.Fprintf(os.Stderr, "warning: accepting unverified plaintext credential storage for this configuration: %s\n", terminalSafeInline(assessment.Details))
+				}
+				credentialSource = credentials.ProviderFile
+				credentialRef = normalizedReference
+				fmt.Printf("Password will be read from externally managed file reference %s; the file is not copied or modified.\n", terminalSafeInline(normalizedReference))
+			case "auto":
+				keyringProvider, err := registry.Provider(credentials.ProviderKeyring)
+				if err != nil {
+					return err
+				}
+				if keyringProvider.Report().Available {
+					fmt.Print("Store password in OS keychain? [y/N]: ")
+					confirmed, err := readYes(cmd.InOrStdin())
+					if err != nil {
+						return fmt.Errorf("read confirmation: %w", err)
+					}
+					if confirmed {
+						if err := storeInKeyring(); err != nil {
+							return err
+						}
+					} else {
+						fmt.Println("Password not stored. It will be read from the environment or prompted at unlock time.")
+					}
+				} else {
+					fmt.Printf("No usable secure keyring was detected. Password will be read from %s or prompted at unlock time. Run 'credentials providers' for details.\n", terminalSafeInline(envName))
+				}
+			}
+
+			d := config.Device{
+				Name:             name,
+				Host:             host,
+				User:             user,
+				Port:             port,
+				Cred:             cred,
+				CredentialSource: credentialSource,
+				CredentialRef:    credentialRef,
+				SuccessMessage:   successMsg,
+				AutoUnlock:       autoUnlock,
+			}
+			if err := config.ValidateDevice(d); err != nil {
+				if storedProvider != nil {
+					_ = storedProvider.Delete(cred)
+				}
+				return err
+			}
 			if err := s.Add(d); err != nil {
-				if credentialStored {
-					if deleteErr := credentials.Delete(cred); deleteErr != nil {
+				if storedProvider != nil {
+					if deleteErr := storedProvider.Delete(cred); deleteErr != nil {
 						return errors.Join(err, fmt.Errorf("roll back keychain credential: %w", deleteErr))
 					}
 				}
 				return err
 			}
-			fmt.Println("added", terminalSafeInline(name))
+			fmt.Printf("Added device %q.\n", terminalSafeInline(name))
 			return nil
 		},
 	}
@@ -217,19 +331,34 @@ func main() {
 	addCmd.Flags().String("user", "", "SSH user (required)")
 	addCmd.Flags().Int("port", 22, "SSH port")
 	addCmd.Flags().String("success-message", "", "SSH output string indicating successful unlock")
+	addCmd.Flags().String("credential-source", "auto", "Credential source: auto, runtime, keyring, or file")
+	addCmd.Flags().String("credential-file", "", "Absolute path or systemd:<name> reference for an externally managed credential file")
+	addCmd.Flags().Bool("allow-unsafe-credential-storage", false, "Allow an unverified plaintext credential file for this command only")
+	addCmd.Flags().Bool("auto-unlock", false, "Allow the persistent daemon to unlock this device after conclusively detecting FileVault pre-boot")
 
 	removeCmd := &cobra.Command{
 		Use:   "remove [name...]",
 		Short: "Remove device(s)",
-		Long:  "Remove device(s) by name from the configuration. If no device names are provided, all configured devices will be removed.",
+		Long:  "Remove configured devices by name. To remove every configured device, use --all explicitly; bulk removal asks for confirmation unless --yes is supplied.",
 		Args:  cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			removeAll, _ := cmd.Flags().GetBool("all")
+			yes, _ := cmd.Flags().GetBool("yes")
+			if removeAll && len(args) > 0 {
+				return fmt.Errorf("--all cannot be combined with device names")
+			}
+			if !removeAll && len(args) == 0 {
+				return fmt.Errorf("specify at least one device name or use --all")
+			}
+			if yes && !removeAll {
+				return fmt.Errorf("--yes can only be used with --all")
+			}
 			s, err := configStore()
 			if err != nil {
 				return err
 			}
 
-			if len(args) == 0 {
+			if removeAll {
 				allDevices, err := s.Load()
 				if err != nil {
 					return err
@@ -238,15 +367,17 @@ func main() {
 					fmt.Println("No devices configured. Nothing to remove.")
 					return nil
 				}
-				fmt.Printf("WARNING: No device names specified. This will remove ALL %d configured devices.\n", len(allDevices))
-				fmt.Print("Are you sure you want to remove all devices? [y/N]: ")
-				confirmed, err := readYes(cmd.InOrStdin())
-				if err != nil {
-					return fmt.Errorf("read confirmation: %w", err)
-				}
-				if !confirmed {
-					fmt.Println("Operation cancelled.")
-					return nil
+				if !yes {
+					fmt.Printf("WARNING: This will remove ALL %d configured devices.\n", len(allDevices))
+					fmt.Print("Are you sure you want to remove all devices? [y/N]: ")
+					confirmed, err := readYes(cmd.InOrStdin())
+					if err != nil {
+						return fmt.Errorf("read confirmation: %w", err)
+					}
+					if !confirmed {
+						fmt.Println("Operation cancelled.")
+						return nil
+					}
 				}
 				removed := 0
 				for _, device := range allDevices {
@@ -269,30 +400,33 @@ func main() {
 			if err != nil {
 				return err
 			}
-			byName := make(map[string]config.Device, len(configured))
-			for _, device := range configured {
-				byName[device.Name] = device
+			devicesToRemove, err := selectConfiguredDevices(configured, args)
+			if err != nil {
+				return err
 			}
-			atLeastOneSuccess := false
-			for _, name := range args {
-				if err := s.Remove(name); err != nil {
-					fmt.Printf("Error removing device %q: %s\n", terminalSafeInline(name), terminalSafeInline(err.Error()))
+			var failed []string
+			for _, device := range devicesToRemove {
+				if err := s.Remove(device.Name); err != nil {
+					fmt.Printf("Error removing device %q: %s\n", terminalSafeInline(device.Name), terminalSafeInline(err.Error()))
+					failed = append(failed, device.Name)
 				} else {
-					deleteStoredCredential(byName[name])
-					fmt.Printf("Removed device %q\n", terminalSafeInline(name))
-					atLeastOneSuccess = true
+					deleteStoredCredential(device)
+					fmt.Printf("Removed device %q.\n", terminalSafeInline(device.Name))
 				}
 			}
-			if !atLeastOneSuccess && len(args) > 0 {
-				return fmt.Errorf("failed to remove any of the specified devices")
+			if len(failed) > 0 {
+				return fmt.Errorf("failed to remove %d of %d selected device(s): %s", len(failed), len(devicesToRemove), strings.Join(failed, ", "))
 			}
 			return nil
 		},
 	}
+	removeCmd.Flags().Bool("all", false, "Remove every configured device (confirmation required)")
+	removeCmd.Flags().Bool("yes", false, "Skip the confirmation prompt for --all")
 
 	listCmd := &cobra.Command{
 		Use:   "list",
 		Short: "List configured devices",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			s, err := configStore()
 			if err != nil {
@@ -306,27 +440,28 @@ func main() {
 				fmt.Println("No devices configured. Use 'config add' to add a device.")
 				return nil
 			}
-			fmt.Println("\nConfigured Devices:")
-			fmt.Println("------------------")
-			for _, d := range devs {
-				credStatus := credentialSourceLabel(d)
-				fmt.Printf("Name: %s\n", terminalSafeInline(d.Name))
-				fmt.Printf("Host: %s\n", terminalSafeInline(d.Host))
-				if d.Port != 0 {
-					fmt.Printf("Port: %d\n", d.Port)
-				} else {
-					fmt.Printf("Port: 22 (default)\n")
-				}
-				fmt.Printf("User: %s\n", terminalSafeInline(d.User))
-				fmt.Printf("Auth: %s\n", credStatus)
-				fmt.Println("------------------")
+			fmt.Println("Configured devices:")
+			tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
+			if _, err := fmt.Fprintln(tw, "NAME\tENDPOINT\tSSH USER\tCREDENTIAL\tUNLOCK"); err != nil {
+				return err
 			}
-			return nil
+			for _, d := range devs {
+				unlockMode := "manual"
+				if d.AutoUnlock {
+					unlockMode = "automatic"
+				}
+				if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+					terminalSafeInline(d.Name), terminalSafeInline(deviceEndpoint(d)),
+					terminalSafeInline(d.User), credentialSourceLabel(d), unlockMode); err != nil {
+					return err
+				}
+			}
+			return tw.Flush()
 		},
 	}
 
 	showCmd := &cobra.Command{
-		Use:   "show [name]",
+		Use:   "show NAME",
 		Short: "Show details of a specific device",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -349,24 +484,16 @@ func main() {
 			if d == nil {
 				return fmt.Errorf("device not found: %s", name)
 			}
-			fmt.Println("\nDevice Details:")
-			fmt.Println("------------------")
-			fmt.Printf("Name: %s\n", terminalSafeInline(d.Name))
-			fmt.Printf("Host: %s\n", terminalSafeInline(d.Host))
-			if d.Port != 0 {
-				fmt.Printf("Port: %d\n", d.Port)
-			} else {
-				fmt.Printf("Port: 22 (default)\n")
-			}
-			fmt.Printf("User: %s\n", terminalSafeInline(d.User))
-			credStatus := credentialSourceLabel(*d)
-			fmt.Printf("Auth: %s\n", credStatus)
-			fmt.Println("------------------")
+			fmt.Printf("Device: %s\n", terminalSafeInline(d.Name))
+			fmt.Printf("Endpoint: %s\n", terminalSafeInline(deviceEndpoint(*d)))
+			fmt.Printf("SSH user: %s\n", terminalSafeInline(d.User))
+			fmt.Printf("Credential: %s\n", credentialSourceLabel(*d))
+			fmt.Printf("Automatic unlock: %t\n", d.AutoUnlock)
 			return nil
 		},
 	}
 
-	cfgCmd.AddCommand(addCmd, removeCmd, listCmd, showCmd)
+	cfgCmd.AddCommand(addCmd, removeCmd, listCmd, showCmd, newAutoUnlockConfigCommand(), newConfigExportCommand(), newConfigApplyCommand())
 
 	unlockCmd := &cobra.Command{
 		Use:   "unlock [name...]",
@@ -375,6 +502,13 @@ func main() {
 		Args:  cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			verbose, _ := cmd.Flags().GetBool("verbose")
+			unlockAll, _ := cmd.Flags().GetBool("all")
+			if unlockAll && len(args) > 0 {
+				return fmt.Errorf("--all cannot be combined with device names")
+			}
+			if !unlockAll && len(args) == 0 {
+				return fmt.Errorf("specify at least one device name or use --all")
+			}
 			s, err := configStore()
 			if err != nil {
 				return err
@@ -384,31 +518,21 @@ func main() {
 				return err
 			}
 
-			deviceMap := make(map[string]config.Device)
-			for _, device := range allDevices {
-				deviceMap[device.Name] = device
-			}
-
 			var devicesToUnlock []config.Device
-			if len(args) == 0 {
-				fmt.Println("No specific devices named. Attempting to unlock all configured devices...")
+			if unlockAll {
 				devicesToUnlock = allDevices
+				if len(devicesToUnlock) > 0 {
+					fmt.Printf("Attempting to unlock all %d configured device(s).\n", len(devicesToUnlock))
+				}
 			} else {
-				fmt.Printf("Attempting to unlock specific devices: %q\n", args)
-				for _, deviceName := range args {
-					if device, found := deviceMap[deviceName]; found {
-						devicesToUnlock = append(devicesToUnlock, device)
-					} else {
-						fmt.Printf("Warning: Device %q not found in configuration. Skipping.\n", terminalSafeInline(deviceName))
-					}
+				devicesToUnlock, err = selectConfiguredDevices(allDevices, args)
+				if err != nil {
+					return err
 				}
 			}
 
 			if len(devicesToUnlock) == 0 {
-				if len(args) > 0 {
-					return fmt.Errorf("none of the requested devices are configured")
-				}
-				fmt.Println("No devices to unlock.")
+				fmt.Println("No configured devices to unlock.")
 				return nil
 			}
 
@@ -429,6 +553,7 @@ func main() {
 
 			maxAttempts, _ := cmd.Flags().GetInt("retry-attempts")
 			retryDelay, _ := cmd.Flags().GetDuration("retry-delay")
+			allowUnsafeStorage, _ := cmd.Flags().GetBool("allow-unsafe-credential-storage")
 			if maxAttempts < 1 {
 				return fmt.Errorf("--retry-attempts must be at least 1")
 			}
@@ -437,17 +562,25 @@ func main() {
 			}
 
 			atLeastOneSuccess := false
+			var failedDevices []string
 			for _, device := range devicesToUnlock {
 				credID := deviceCredentialID(device)
-				deviceStore := credentialStoreForDevice(device)
+				deviceStore, err := credentialStoreForDevice(device, allowUnsafeStorage)
+				if err != nil {
+					return fmt.Errorf("configure credential provider for %s: %w", device.Name, err)
+				}
 				password, err := deviceStore.Get(credID)
 				if err == nil && password == "" {
 					err = fmt.Errorf("credential is empty")
 				}
 				if err != nil {
+					if errors.Is(err, credentials.ErrUnsafeCredentialStorage) || (device.CredentialSource == credentials.ProviderFile && len(devicesToUnlock) == 1) {
+						return fmt.Errorf("retrieve credential for device %q: %w", device.Name, err)
+					}
 					if len(devicesToUnlock) > 1 {
 						fmt.Printf("warning: failed to retrieve credential for device '%s': %s\n", terminalSafeInline(device.Name), terminalSafeInline(err.Error()))
 						fmt.Printf("Skipping device '%s' due to credential retrieval failure.\n", terminalSafeInline(device.Name))
+						failedDevices = append(failedDevices, device.Name)
 						continue
 					}
 					if verbose {
@@ -470,6 +603,7 @@ func main() {
 				}
 
 				attempts := 0
+				previousUnacknowledgedAttempt := false
 				for {
 					attempts++
 					hostWithPort := deviceEndpoint(device)
@@ -518,7 +652,11 @@ func main() {
 							}
 						}
 					case fvcore.StatusUnlockedRecently:
-						fmt.Printf("INFO: %s is already unlocked (normal SSH session available).\n", terminalSafeInline(device.Name))
+						if previousUnacknowledgedAttempt {
+							fmt.Printf("VERIFIED: %s is booted after an earlier unlock attempt; the pre-boot success acknowledgement was not observed.\n", terminalSafeInline(device.Name))
+						} else {
+							fmt.Printf("INFO: %s is already booted; normal macOS SSH accepted a public key. No unlock was needed.\n", terminalSafeInline(device.Name))
+						}
 						atLeastOneSuccess = true
 					case fvcore.StatusLocked:
 						// Wrong password; retrying will not help.
@@ -526,10 +664,46 @@ func main() {
 						if len(devicesToUnlock) == 1 {
 							return fmt.Errorf("failed to unlock device '%s': incorrect password", device.Name)
 						}
+						failedDevices = append(failedDevices, device.Name)
 					default:
 						if errors.Is(res.Error, fvcore.ErrHostKeyMismatch) {
 							fmt.Printf("SECURITY ERROR: refusing %s: %s\n", terminalSafeInline(device.Name), terminalSafeInline(res.Error.Error()))
 							return res.Error
+						}
+						if errors.Is(res.Error, fvcore.ErrUnlockOutcomeUnknown) {
+							previousUnacknowledgedAttempt = true
+							if verifyWindow > 0 {
+								fmt.Printf("The password was submitted, but %s did not acknowledge the outcome. Checking for normal macOS without sending the password again (up to %v)...\n", terminalSafeInline(device.Name), verifyWindow)
+								opts := fvcore.DefaultVerifyOptions()
+								opts.Grace = 0
+								opts.Window = verifyWindow
+								opts.Interval = 2 * time.Second
+								opts.AttemptTimeout = 5 * time.Second
+								if verifyWindow < opts.AttemptTimeout {
+									opts.AttemptTimeout = verifyWindow
+								}
+								ok, verr := fvcore.VerifyUnlock(ctx, client, fvDevice, opts)
+								switch {
+								case errors.Is(verr, fvcore.ErrHostKeyMismatch):
+									return verr
+								case ok:
+									fmt.Printf("VERIFIED: %s is booted and reachable over SSH after the unlock attempt; the pre-boot success acknowledgement was not observed.\n", terminalSafeInline(device.Name))
+									atLeastOneSuccess = true
+									break
+								case errors.Is(verr, fvcore.ErrIndeterminate):
+									fmt.Printf("NOTE: %s is still reachable but its state cannot yet be proved without a public key; continuing the configured retry policy.\n", terminalSafeInline(device.Name))
+								case verr != nil:
+									if errors.Is(verr, context.Canceled) {
+										return verr
+									}
+									fmt.Printf("NOTE: boot verification after the unacknowledged attempt failed: %s\n", terminalSafeInline(verr.Error()))
+								default:
+									fmt.Printf("NOTE: %s did not return to normal SSH within %v; continuing the configured retry policy.\n", terminalSafeInline(device.Name), verifyWindow)
+								}
+								if ok {
+									break
+								}
+							}
 						}
 						// StatusUnknown: transient (network not up yet, dial
 						// error). These are the cases worth retrying.
@@ -551,11 +725,15 @@ func main() {
 						if res.Error != nil && len(devicesToUnlock) == 1 {
 							return res.Error
 						}
+						failedDevices = append(failedDevices, device.Name)
 					}
 					break
 				}
 			}
 
+			if len(failedDevices) > 0 {
+				return fmt.Errorf("failed to unlock %d of %d selected device(s): %s", len(failedDevices), len(devicesToUnlock), strings.Join(failedDevices, ", "))
+			}
 			if !atLeastOneSuccess && len(devicesToUnlock) > 0 {
 				if len(devicesToUnlock) == 1 {
 					return fmt.Errorf("failed to unlock device '%s'", devicesToUnlock[0].Name)
@@ -565,22 +743,25 @@ func main() {
 			return nil
 		},
 	}
+	unlockCmd.Flags().Bool("all", false, "Unlock every configured device")
 	unlockCmd.Flags().Bool("verbose", false, "Print detailed SSH output and debug info")
 	unlockCmd.Flags().Int("retry-attempts", 10, "The maximum number of times to try connecting to the device before giving up")
 	unlockCmd.Flags().Duration("retry-delay", 30*time.Second, "The delay between connection attempts (e.g., 15s, 1m, 30s)")
 	unlockCmd.Flags().Bool("insecure-host-key", false, "Disable SSH host-key verification (INSECURE: exposes the password to a man-in-the-middle)")
-	unlockCmd.Flags().StringSlice("identity", nil, "Private key for deterministic post-boot verification (repeatable; unencrypted keys only)")
+	unlockCmd.Flags().StringSlice("identity", nil, "Private key for deterministic post-boot verification (repeatable; defaults to standard ~/.ssh identities)")
 	unlockCmd.Flags().Duration("verify-timeout", 5*time.Minute, "How long to wait after unlocking for the device to boot and answer SSH normally")
 	unlockCmd.Flags().Bool("no-verify", false, "Skip post-unlock verification (report success as soon as the unlock is accepted)")
+	unlockCmd.Flags().Bool("allow-unsafe-credential-storage", false, "Allow reading an unverified plaintext credential file for this command only")
 
 	statusCmd := &cobra.Command{
 		Use:   "status [name...]",
-		Short: "Check whether device(s) are locked, without sending the password",
+		Short: "Check device state without sending the FileVault password",
 		Long:  statusLongHelp,
 		Args:  cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			verbose, _ := cmd.Flags().GetBool("verbose")
 			insecure, _ := cmd.Flags().GetBool("insecure-host-key")
+			jsonOutput, _ := cmd.Flags().GetBool("json")
 			s, err := configStore()
 			if err != nil {
 				return err
@@ -594,55 +775,101 @@ func main() {
 			if len(args) == 0 {
 				targets = allDevices
 			} else {
-				m := make(map[string]config.Device)
-				for _, d := range allDevices {
-					m[d.Name] = d
-				}
-				for _, n := range args {
-					if d, ok := m[n]; ok {
-						targets = append(targets, d)
-					} else {
-						fmt.Printf("Warning: Device %q not found in configuration. Skipping.\n", terminalSafeInline(n))
-					}
+				targets, err = selectConfiguredDevices(allDevices, args)
+				if err != nil {
+					return err
 				}
 			}
 			if len(targets) == 0 {
-				if len(args) > 0 {
-					return fmt.Errorf("none of the requested devices are configured")
+				if jsonOutput {
+					return writeStatusJSON(cmd.OutOrStdout(), []statusReport{})
 				}
-				fmt.Println("No devices to check.")
+				fmt.Fprintln(cmd.OutOrStdout(), "No configured devices to check.")
 				return nil
 			}
 
 			acceptNew, _ := cmd.Flags().GetBool("accept-new-host-key")
+			if acceptNew && len(args) != 1 {
+				return fmt.Errorf("--accept-new-host-key requires exactly one named device")
+			}
+			requireKnown, _ := cmd.Flags().GetBool("require-known")
 			identityFiles, _ := cmd.Flags().GetStringSlice("identity")
 			client, err := newSSHClient(verbose, insecure, acceptNew, identityFiles)
 			if err != nil {
 				return err
 			}
 			ctx := cmd.Context()
+			var indeterminateDevices []string
+			var failedDevices []string
+			reports := make([]statusReport, 0, len(targets))
 			for _, d := range targets {
 				hostWithPort := deviceEndpoint(d)
 				st, _, perr := fvcore.CheckStatus(ctx, client, hostWithPort, d.User, 15*time.Second)
+				report := statusReport{Name: d.Name, Endpoint: hostWithPort, CheckedAt: time.Now().UTC()}
 				switch {
 				case st == fvcore.StatusLocked:
-					fmt.Printf("%-20s locked\n", terminalSafeInline(d.Name))
+					report.State = "locked"
+					report.Evidence = "FileVault pre-boot banner detected"
+					if !jsonOutput {
+						fmt.Printf("%-20s locked (FileVault pre-boot banner detected)\n", terminalSafeInline(d.Name))
+					}
 				case st == fvcore.StatusUnlockedRecently:
 					// A completed SSH handshake (here, via public key) proves the
 					// machine has booted past the FileVault prompt.
-					fmt.Printf("%-20s unlocked (booted, SSH available)\n", terminalSafeInline(d.Name))
+					report.State = "booted"
+					report.Evidence = "normal macOS SSH accepted a public key"
+					if !jsonOutput {
+						fmt.Printf("%-20s booted (normal macOS SSH accepted a public key)\n", terminalSafeInline(d.Name))
+					}
 				case errors.Is(perr, fvcore.ErrHostKeyMismatch):
-					return perr
+					report.State = "error"
+					report.Error = perr.Error()
+					if !jsonOutput {
+						fmt.Printf("%-20s error (%s)\n", terminalSafeInline(d.Name), terminalSafeInline(perr.Error()))
+					}
+					failedDevices = append(failedDevices, d.Name)
 				case errors.Is(perr, fvcore.ErrIndeterminate):
 					// A booted sshd prompts for a password just like the pre-boot
 					// server, so without a key or password we cannot say. Supply
 					// an SSH key (ssh-agent or --identity) to resolve these.
-					fmt.Printf("%-20s %s\n", terminalSafeInline(d.Name), indeterminateStatusText)
+					report.State = "indeterminate"
+					report.Evidence = "SSH reachable; no proof of FileVault pre-boot or booted macOS"
+					if !jsonOutput {
+						fmt.Printf("%-20s %s\n", terminalSafeInline(d.Name), indeterminateStatusText)
+					}
+					indeterminateDevices = append(indeterminateDevices, d.Name)
 				case perr != nil:
-					fmt.Printf("%-20s unknown (%s)\n", terminalSafeInline(d.Name), terminalSafeInline(perr.Error()))
+					report.State = "error"
+					report.Error = perr.Error()
+					if !jsonOutput {
+						fmt.Printf("%-20s error (%s)\n", terminalSafeInline(d.Name), terminalSafeInline(perr.Error()))
+					}
+					failedDevices = append(failedDevices, d.Name)
 				default:
-					fmt.Printf("%-20s %s\n", terminalSafeInline(d.Name), st)
+					report.State = st.String()
+					if !jsonOutput {
+						fmt.Printf("%-20s %s\n", terminalSafeInline(d.Name), st)
+					}
 				}
+				reports = append(reports, report)
+			}
+			if jsonOutput {
+				if err := writeStatusJSON(cmd.OutOrStdout(), reports); err != nil {
+					return err
+				}
+			} else if len(indeterminateDevices) > 0 {
+				fmt.Println("\nStatus never sends the FileVault password. A prompt-only pre-boot server and booted password-only SSH look identical.")
+				if len(client.Signers) == 0 {
+					fmt.Println("No usable SSH identity was found. Add one to ssh-agent or select an unencrypted key with --identity.")
+				} else {
+					fmt.Println("This is expected while a prompt-only Mac is locked. To prove it is booted, authorize one of the offered public keys for the configured user.")
+				}
+			}
+			if len(failedDevices) > 0 {
+				return fmt.Errorf("status failed for %d device(s): %s", len(failedDevices), strings.Join(failedDevices, ", "))
+			}
+			if requireKnown && len(indeterminateDevices) > 0 {
+				return fmt.Errorf("status was indeterminate for %d device(s): %s", len(indeterminateDevices), strings.Join(indeterminateDevices, ", "))
 			}
 			return nil
 		},
@@ -650,9 +877,11 @@ func main() {
 	statusCmd.Flags().Bool("verbose", false, "Print detailed output")
 	statusCmd.Flags().Bool("insecure-host-key", false, "Disable SSH host-key verification (INSECURE)")
 	statusCmd.Flags().Bool("accept-new-host-key", false, "Trust and record an unknown host key after independently verifying its fingerprint")
-	statusCmd.Flags().StringSlice("identity", nil, "Private key used to prove normal macOS is booted (repeatable; unencrypted keys only)")
+	statusCmd.Flags().StringSlice("identity", nil, "Private key used to prove normal macOS is booted (repeatable; defaults to standard ~/.ssh identities)")
+	statusCmd.Flags().Bool("require-known", false, "Exit unsuccessfully if any reachable device remains indeterminate")
+	statusCmd.Flags().Bool("json", false, "Emit a stable machine-readable JSON report")
 
-	rootCmd.AddCommand(cfgCmd, unlockCmd, statusCmd, newDiscoverCommand(), newScanCommand())
+	rootCmd.AddCommand(cfgCmd, unlockCmd, statusCmd, newCredentialsCommand(), newDiscoverCommand(), newScanCommand(), newDaemonCommand(), newTUICommand(), newHealthcheckCommand())
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %s\n", terminalSafeInline(err.Error()))
@@ -660,7 +889,35 @@ func main() {
 	}
 }
 
-func configPath() (string, error) {
+type statusReport struct {
+	Name      string    `json:"name"`
+	Endpoint  string    `json:"endpoint"`
+	State     string    `json:"state"`
+	Evidence  string    `json:"evidence,omitempty"`
+	Error     string    `json:"error,omitempty"`
+	CheckedAt time.Time `json:"checked_at"`
+}
+
+func writeStatusJSON(output io.Writer, reports []statusReport) error {
+	return json.NewEncoder(output).Encode(struct {
+		SchemaVersion int            `json:"schema_version"`
+		Devices       []statusReport `json:"devices"`
+	}{SchemaVersion: 1, Devices: reports})
+}
+
+func appDataDir() (string, error) {
+	if dataDirOverride != "" {
+		if !filepath.IsAbs(dataDirOverride) {
+			return "", fmt.Errorf("--data-dir must be an absolute path")
+		}
+		return filepath.Clean(dataDirOverride), nil
+	}
+	if fromEnv := strings.TrimSpace(os.Getenv("FV_SSH_UNLOCK_DATA_DIR")); fromEnv != "" {
+		if !filepath.IsAbs(fromEnv) {
+			return "", fmt.Errorf("FV_SSH_UNLOCK_DATA_DIR must be an absolute path")
+		}
+		return filepath.Clean(fromEnv), nil
+	}
 	homedir, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("find home directory: %w", err)
@@ -668,7 +925,15 @@ func configPath() (string, error) {
 	if homedir == "" {
 		return "", fmt.Errorf("find home directory: empty path")
 	}
-	return filepath.Join(homedir, ".fv-ssh-unlock", "devices.json"), nil
+	return filepath.Join(homedir, ".fv-ssh-unlock"), nil
+}
+
+func configPath() (string, error) {
+	dir, err := appDataDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "devices.json"), nil
 }
 
 func readYes(r io.Reader) (bool, error) {
@@ -705,6 +970,30 @@ func configStore() (*config.Store, error) {
 	return &config.Store{Path: path}, nil
 }
 
+// selectConfiguredDevices resolves every requested name before a command takes
+// action. This avoids surprising partial operations when one name is misspelled
+// and rejects accidental duplicate targets.
+func selectConfiguredDevices(devices []config.Device, names []string) ([]config.Device, error) {
+	byName := make(map[string]config.Device, len(devices))
+	for _, device := range devices {
+		byName[device.Name] = device
+	}
+	selected := make([]config.Device, 0, len(names))
+	seen := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		if _, duplicate := seen[name]; duplicate {
+			return nil, fmt.Errorf("device %q was specified more than once", name)
+		}
+		device, ok := byName[name]
+		if !ok {
+			return nil, fmt.Errorf("device not found: %s", name)
+		}
+		seen[name] = struct{}{}
+		selected = append(selected, device)
+	}
+	return selected, nil
+}
+
 func deviceCredentialID(device config.Device) string {
 	if device.Cred != "" {
 		return device.Cred
@@ -722,63 +1011,73 @@ func deviceEndpoint(device config.Device) string {
 
 func credentialSourceLabel(device config.Device) string {
 	switch device.CredentialSource {
-	case "keyring":
-		return "Credential in keychain"
-	case "runtime":
-		return "Environment or interactive prompt"
+	case credentials.ProviderKeyring:
+		return "OS keyring"
+	case credentials.ProviderRuntime:
+		return "runtime (environment or hidden prompt)"
+	case credentials.ProviderFile:
+		return "external file (" + terminalSafeInline(device.CredentialRef) + ")"
 	default:
 		if device.Cred == "" {
-			return "Legacy environment or interactive prompt"
+			return "legacy runtime (environment or hidden prompt)"
 		}
-		return "Legacy keychain credential"
+		return "legacy OS keyring"
 	}
 }
 
-func credentialStoreForDevice(device config.Device) fvcore.CredentialStore {
-	switch device.CredentialSource {
-	case "runtime":
-		return &environmentStore{}
-	case "keyring":
-		return &keyringStore{}
-	default:
+func credentialStoreForDevice(device config.Device, allowUnsafeStorage bool) (fvcore.CredentialStore, error) {
+	source := device.CredentialSource
+	reference := deviceCredentialID(device)
+	if source == "" {
 		// Before credential_source existed, an empty cred meant that the user
 		// declined keychain storage. Preserve that behavior during migration.
 		if device.Cred == "" {
-			return &environmentStore{}
+			source = credentials.ProviderRuntime
+		} else {
+			source = credentials.ProviderKeyring
 		}
-		return &keyringStore{}
 	}
+	if source == credentials.ProviderFile {
+		reference = device.CredentialRef
+	}
+	registry := credentials.NewRegistry(credentials.Options{AllowUnsafeCredentialStorage: allowUnsafeStorage})
+	provider, err := registry.Provider(source)
+	if err != nil {
+		return nil, err
+	}
+	return &providerStore{provider: provider, reference: reference}, nil
 }
 
 func deleteStoredCredential(device config.Device) {
-	if device.CredentialSource == "runtime" || !credentials.CanStore() {
+	source := device.CredentialSource
+	if source == "" {
+		if device.Cred == "" {
+			return
+		}
+		source = credentials.ProviderKeyring
+	}
+	if source == credentials.ProviderRuntime || source == credentials.ProviderFile {
 		return
 	}
-	if err := credentials.Delete(deviceCredentialID(device)); err != nil {
+	provider, err := credentials.NewRegistry(credentials.Options{}).Provider(source)
+	if err != nil || !provider.Report().Built {
+		return
+	}
+	if err := provider.Delete(deviceCredentialID(device)); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: removed device %q but could not remove its keyring credential: %s\n", terminalSafeInline(device.Name), terminalSafeInline(err.Error()))
 	}
 }
 
-// keyringStore adapts internal/credentials to fvcore.CredentialStore.
-type keyringStore struct{}
-
-func (k *keyringStore) Get(name string) (string, error) {
-	if strings.HasPrefix(strings.ToLower(name), "fvu-") {
-		return credentials.Get(name)
-	}
-	return credentials.Get(fmt.Sprintf("fvu-%s", strings.ToLower(name)))
+// providerStore binds a provider reference to fvcore's name-based credential
+// interface. The reference may be a keyring ID, environment-derived ID, or an
+// external file reference.
+type providerStore struct {
+	provider  credentials.Provider
+	reference string
 }
 
-func (k *keyringStore) Set(name, value string) error {
-	return credentials.Set(name, value)
-}
-
-// environmentStore retrieves only the explicit runtime environment variable,
-// including in keyring-enabled builds.
-type environmentStore struct{}
-
-func (*environmentStore) Get(name string) (string, error) {
-	return credentials.GetEnvironment(name)
+func (s *providerStore) Get(string) (string, error) {
+	return s.provider.Get(s.reference)
 }
 
 // staticStore is an in-memory CredentialStore used when we prompt for a

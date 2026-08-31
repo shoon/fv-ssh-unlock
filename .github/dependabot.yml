@@ -32,3 +32,14 @@ updates:
     labels:
       - dependencies
     open-pull-requests-limit: 5
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "10:20"
+      timezone: America/New_York
+    labels:
+      - dependencies
+    open-pull-requests-limit: 5

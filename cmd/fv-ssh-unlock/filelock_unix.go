@@ -16,6 +16,10 @@ func lockKnownHostsFile(f *os.File) error {
 	return unix.Flock(int(f.Fd()), unix.LOCK_EX)
 }
 
+func tryLockDaemonFile(f *os.File) error {
+	return unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+}
+
 func unlockKnownHostsFile(f *os.File) {
 	_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
 }

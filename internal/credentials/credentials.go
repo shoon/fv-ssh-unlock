@@ -2,7 +2,8 @@
 //
 // Copyright 2025-2026 Shaun Murphy
 
-// Package credentials provides access to stored credentials.
+// Package credentials provides runtime, external-file, and OS-keyring
+// credential providers and reports their security capabilities.
 package credentials
 
 import (
