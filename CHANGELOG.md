@@ -6,6 +6,24 @@ All notable changes to this project are documented here.
 
 ### Added
 
+- Project-owned Homebrew and Scoop sources for prerelease installation, plus
+  release-built DEB and RPM packages for Linux AMD64 and ARM64.
+- Package CI that builds, inspects, installs, executes, and removes native
+  packages before release.
+- Container author and GitHub Sponsors metadata exposed as OCI labels without
+  adding files or packages to the scratch image.
+
+### Changed
+
+- Bound native releases to the pushed semantic-version tag, exact checkout,
+  GitHub event commit, and `main` ancestry, matching the container release
+  gate. Container signature verification now tolerates bounded registry
+  referrer propagation without weakening the expected workflow identity.
+
+## [0.2.0-rc.2] - 2026-08-31
+
+### Added
+
 - Public, multi-platform Docker Hub releases at
   `shoonimages/fv-ssh-unlock:<version>`, with automatic semantic-tag
   publication, anonymous-access verification, SPDX SBOM and provenance
@@ -14,12 +32,6 @@ All notable changes to this project are documented here.
 - A canonical logging and SIEM guide covering the JSON event contract,
   severity and sequence semantics, alerting, bounded retention, and external
   Fluent Bit or Vector collection.
-- Project-owned Homebrew and Scoop sources for prerelease installation, plus
-  release-built DEB and RPM packages for Linux AMD64 and ARM64.
-- Package CI that builds, inspects, installs, executes, and removes native
-  packages before release.
-- Container author and GitHub Sponsors metadata exposed as OCI labels without
-  adding files or packages to the scratch image.
 
 ### Changed
 
@@ -34,10 +46,6 @@ All notable changes to this project are documented here.
   `config add` to provision an OS-keyring entry.
 - Corrected `config add` help to state that `--host` and `--user` are required
   and that the positional device name is an optional local alias.
-- Bound native releases to the pushed semantic-version tag, exact checkout,
-  GitHub event commit, and `main` ancestry, matching the container release
-  gate. Container signature verification now tolerates bounded registry
-  referrer propagation without weakening the expected workflow identity.
 
 ## [0.2.0-rc.1] - 2026-08-30
 

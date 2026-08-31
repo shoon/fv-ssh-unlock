@@ -87,10 +87,15 @@ sudo rpm -i fv-ssh-unlock_X.Y.Z_linux_arm64.rpm
 
 Use `amd64` instead of `arm64` on an Intel or AMD controller. The packages
 install the binary as `/usr/bin/fv-ssh-unlock` and place the license and notices
-under `/usr/share/doc/fv-ssh-unlock`. They do not create a user, write a
-credential, install configuration, or enable the daemon. Follow the
-[native systemd guide](containers-and-services.md#native-systemd) after
-installation.
+under `/usr/share/doc/fv-ssh-unlock`. They also install a systemd unit at
+`/usr/lib/systemd/system/fv-ssh-unlock.service` whose `ExecStart` already points
+at the packaged `/usr/bin` path, so do not copy the unit from the repository
+over it — the tracked `deploy/systemd/fv-ssh-unlock.service` uses
+`/usr/local/bin` for source and archive installs. The packages do not create a
+user, write a credential, install configuration, or enable the daemon. Follow
+the [native systemd guide](containers-and-services.md#native-systemd) after
+installation, skipping its unit-installation step and starting from the user,
+credential, and `systemctl enable` steps.
 
 These files are installable packages, not hosted APT or DNF repositories.
 `apt upgrade` and `dnf upgrade` cannot discover newer GitHub release assets.

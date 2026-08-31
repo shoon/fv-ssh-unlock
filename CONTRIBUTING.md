@@ -119,6 +119,11 @@ Both workflows accept only a pushed semantic-version tag and check that the
 tag, checked-out commit, GitHub event, and a commit on `origin/main` resolve to
 the same source.
 `workflow_dispatch` is verification-only and cannot publish an arbitrary tag.
+The Release workflow enforces this structurally: a `verify` job builds, tests,
+scans, and runs `goreleaser check`, while the separate `publish` job that
+uploads the release is gated on `github.event_name == 'push'` and is the only
+job granted `contents: write` and `id-token: write`. A manual dispatch
+therefore runs verification and stops.
 The repository requires `DOCKERHUB_USERNAME` and a narrowly scoped
 `DOCKERHUB_TOKEN` with read/write but no delete or administrative permission.
 Give the token a finite lifetime, record its expiry in maintainer operations,
@@ -138,6 +143,14 @@ Dependabot checks the main Go module, mock-server Go module, and GitHub Actions
 weekly. CI also scans every build variant for reachable vulnerabilities and
 builds a package snapshot. The package job installs and executes the AMD64 DEB
 and inspects both DEB/RPM architectures before a release tag is accepted.
+CI additionally runs `golangci-lint` (including `gosec` and `errorlint`) over
+the default and keyring build tags, exercises the keyring backend on Linux,
+macOS, and Windows, and analyzes Go and workflow sources with CodeQL. Pull
+requests also run dependency review. Run the linter locally with:
+
+```bash
+go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2 run
+```
 
 The Homebrew tap and Scoop bucket are separate public repositories so their
 automation tokens remain scoped to their own package metadata. Homebrew and
