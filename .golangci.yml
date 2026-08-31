@@ -7,10 +7,6 @@ version: "2"
 
 run:
   timeout: 5m
-  # Lint the keyring-tagged sources too; that variant ships in the Linux,
-  # macOS and Windows release binaries but is invisible to a default build.
-  build-tags:
-    - keyring
 
 linters:
   default: standard
@@ -25,19 +21,40 @@ linters:
     # paths classify failures by error identity, so unwrapped comparisons
     # are a correctness risk here, not a style nit.
     - errorlint
-  settings:
-    errcheck:
-      # Terminal and diagnostic output is best-effort by design; a failed
-      # write to stdout/stderr must never abort a monitoring or unlock
-      # operation. Writes that matter (state files, known_hosts) go through
-      # securefs and check every error explicitly.
-      exclude-functions:
-        - fmt.Fprint
-        - fmt.Fprintf
-        - fmt.Fprintln
   exclusions:
     generated: lax
     rules:
+      # These Cobra writes are deliberately best-effort terminal output. Keep
+      # the exception tied to the command output accessor so a future write to
+      # a file or socket in the same source file is still checked.
+      - path: ^cmd/fv-ssh-unlock/(automation|control_commands|main)\.go$
+        source: 'fmt\.Fprint(f|ln)?\(cmd\.OutOrStdout\(\)'
+        linters:
+          - errcheck
+      # unlockDevice's out parameter is the Cobra command's terminal writer.
+      # Pairing the file and destination name leaves every other writer under
+      # errcheck rather than exempting fmt.Fprintf process-wide.
+      - path: ^cmd/fv-ssh-unlock/main\.go$
+        source: 'fmt\.Fprintf\(out,'
+        linters:
+          - errcheck
+      # Every output/tw write in the TUI targets its interactive terminal. A
+      # failed redraw cannot be recovered after the terminal has gone away;
+      # other destination names in the same file remain checked.
+      - path: ^cmd/fv-ssh-unlock/tui\.go$
+        source: 'fmt\.Fprint(f|ln)?\((output|tw),'
+        linters:
+          - errcheck
+      # Test response bodies and environment cleanup are fixture setup, not
+      # shipped I/O paths. Keep each exception local to the existing fixture.
+      - path: ^internal/control/socket_test\.go$
+        source: 'fmt\.Fprint\(w, `\{'
+        linters:
+          - errcheck
+      - path: ^internal/credentials/credentials_test\.go$
+        source: 'os\.(Setenv|Unsetenv)\('
+        linters:
+          - errcheck
       # Test files legitimately use fixed test credentials, permissive temp
       # dir modes and math/rand; gosec flags all three.
       - path: _test\.go$

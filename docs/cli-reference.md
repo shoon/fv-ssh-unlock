@@ -170,7 +170,8 @@ fv-ssh-unlock status [name...] [flags]
 `status` never loads or sends the FileVault password. Without `--identity`, it
 tries keys from `ssh-agent` and regular standard identity files such as
 `~/.ssh/id_ed25519` and `~/.ssh/id_rsa`. An explicit identity must be
-unencrypted; add encrypted identities to `ssh-agent` instead.
+unencrypted and pass the platform private-owner/permission check; add encrypted
+identities to `ssh-agent` instead.
 
 ## `unlock`
 

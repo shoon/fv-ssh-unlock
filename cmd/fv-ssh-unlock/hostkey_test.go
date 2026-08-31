@@ -114,6 +114,32 @@ func TestHostKeyEnrollmentRequiresExpectedFingerprint(t *testing.T) {
 	}
 }
 
+func TestHostKeyEnrollmentChecksExpectedFingerprintForAnAlreadyPinnedHost(t *testing.T) {
+	path := privateKnownHostsTestPath(t)
+	pinned := testPublicKey(t)
+	if err := prepareKnownHosts(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendKnownHost(path, "host.example:22", pinned); err != nil {
+		t.Fatal(err)
+	}
+
+	// The endpoint's key is trusted, but it is not the independently verified
+	// key of the candidate being enrolled. Both conditions must hold.
+	expected := testPublicKey(t)
+	callback, err := hostKeyCallbackExpected(path, true, ssh.FingerprintSHA256(expected))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = callback("host.example:22", &net.TCPAddr{}, pinned)
+	if !errors.Is(err, fvcore.ErrHostKeyMismatch) {
+		t.Fatalf("already-pinned key bypassed expected fingerprint: %v", err)
+	}
+	if lines := strings.Count(strings.TrimSpace(string(mustReadFile(t, path))), "\n") + 1; lines != 1 {
+		t.Fatalf("fingerprint rejection changed known_hosts: %q", mustReadFile(t, path))
+	}
+}
+
 func TestConcurrentHostKeyEnrollmentWritesOnce(t *testing.T) {
 	path := privateKnownHostsTestPath(t)
 	cb, err := hostKeyCallback(path, true)
@@ -244,8 +270,12 @@ func TestDeferredHostKeyIsNotPinnedUntilCommitted(t *testing.T) {
 		t.Fatal("verification did not hand back the observed key")
 	}
 
-	if err := commitPendingHostKey(path, pending); err != nil {
+	inserted, err := commitPendingHostKey(path, pending)
+	if err != nil {
 		t.Fatalf("commit: %v", err)
+	}
+	if !inserted {
+		t.Fatal("commit did not report ownership of the inserted key")
 	}
 	data, err = os.ReadFile(path)
 	if err != nil {
@@ -262,8 +292,12 @@ func TestDeferredHostKeyIsNotPinnedUntilCommitted(t *testing.T) {
 		t.Fatalf("committed key is not pinned: %v", err)
 	}
 	// Committing again must not duplicate the entry.
-	if err := commitPendingHostKey(path, pending); err != nil {
+	inserted, err = commitPendingHostKey(path, pending)
+	if err != nil {
 		t.Fatalf("repeat commit: %v", err)
+	}
+	if inserted {
+		t.Fatal("repeat commit incorrectly claimed an existing key")
 	}
 	if lines := strings.Count(strings.TrimSpace(string(mustReadFile(t, path))), "\n") + 1; lines != 1 {
 		t.Fatalf("expected one pinned key, got %d lines", lines)
@@ -278,6 +312,20 @@ func TestDeferredHostKeyIsNotPinnedUntilCommitted(t *testing.T) {
 	// Removing an entry that is not there is not an error.
 	if err := removeKnownHost(path, pending.hostname, pending.key); err != nil {
 		t.Fatalf("repeat remove: %v", err)
+	}
+}
+
+func TestEmptyPendingHostKeyCommitAndRollbackAreNoOps(t *testing.T) {
+	path := privateKnownHostsTestPath(t)
+	inserted, err := commitPendingHostKey(path, pendingHostKey{})
+	if err != nil || inserted {
+		t.Fatalf("empty pending commit = inserted %t, error %v", inserted, err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("empty pending commit created storage: %v", err)
+	}
+	if err := removeKnownHost(path, "host.example:22", nil); err != nil {
+		t.Fatalf("empty rollback = %v", err)
 	}
 }
 
@@ -301,12 +349,49 @@ func TestCommitPendingHostKeyFailsClosedOnAConflictingEntry(t *testing.T) {
 	if err := appendKnownHost(path, "host.example:22", testPublicKey(t)); err != nil {
 		t.Fatal(err)
 	}
-	err = commitPendingHostKey(path, pending)
+	_, err = commitPendingHostKey(path, pending)
 	if !errors.Is(err, fvcore.ErrHostKeyMismatch) {
 		t.Fatalf("conflicting commit = %v, want a host-key mismatch", err)
 	}
 	if lines := strings.Count(strings.TrimSpace(string(mustReadFile(t, path))), "\n") + 1; lines != 1 {
 		t.Fatalf("refused commit changed known_hosts: %q", mustReadFile(t, path))
+	}
+}
+
+func TestPendingHostKeyCommitDoesNotClaimAnotherWritersIdenticalEntry(t *testing.T) {
+	path := privateKnownHostsTestPath(t)
+	key := testPublicKey(t)
+	pending := pendingHostKey{hostname: "host.example:22", remote: &net.TCPAddr{}, key: key}
+
+	// Model a status command or another process pinning the same verified key
+	// after the enrollment probe but before its commit.
+	if err := prepareKnownHosts(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendKnownHost(path, pending.hostname, key); err != nil {
+		t.Fatal(err)
+	}
+	inserted, err := commitPendingHostKey(path, pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inserted {
+		t.Fatal("commit claimed ownership of another writer's identical entry")
+	}
+
+	// Rollback must be gated by inserted. The other writer's entry remains and
+	// continues to verify normally.
+	if inserted {
+		if err := removeKnownHost(path, pending.hostname, pending.key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	callback, err := hostKeyCallback(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := callback(pending.hostname, pending.remote, key); err != nil {
+		t.Fatalf("another writer's entry was removed: %v", err)
 	}
 }
 

@@ -102,6 +102,44 @@ func TestValidateDeviceRejectsAmbiguousOrUnsafeValues(t *testing.T) {
 	}
 }
 
+func TestValidateDevicesEnforcesInventoryConstraints(t *testing.T) {
+	valid := Device{Name: "one", Host: "one.example", User: "user", Port: 22, Cred: credentials.ID("one")}
+	if err := ValidateDevices([]Device{valid}); err != nil {
+		t.Fatalf("valid inventory rejected: %v", err)
+	}
+
+	duplicate := valid
+	duplicate.Host = "two.example"
+	if err := ValidateDevices([]Device{valid, duplicate}); err == nil || !strings.Contains(err.Error(), "duplicate device name") {
+		t.Fatalf("duplicate inventory error = %v", err)
+	}
+
+	collision := Device{Name: "one_", Host: "two.example", User: "user", Port: 22, Cred: credentials.ID("one_")}
+	first := Device{Name: "one-", Host: "one.example", User: "user", Port: 22, Cred: credentials.ID("one-")}
+	if err := ValidateDevices([]Device{first, collision}); err == nil || !strings.Contains(err.Error(), "share credential environment variable") {
+		t.Fatalf("credential environment collision error = %v", err)
+	}
+}
+
+func TestValidateDeviceRejectsRemainingInvalidFields(t *testing.T) {
+	base := Device{Name: "one", Host: "one.example", User: "user", Port: 22, Cred: credentials.ID("one")}
+	mutations := []func(*Device){
+		func(d *Device) { d.Port = -1 },
+		func(d *Device) { d.CredentialSource = "unknown" },
+		func(d *Device) { d.SuccessMessage = "bad\x00message" },
+		func(d *Device) { d.SuccessMessage = strings.Repeat("x", 4097) },
+		func(d *Device) { d.MACAddress = " bad" },
+		func(d *Device) { d.Cred = "bad\ncredential" },
+	}
+	for index, mutate := range mutations {
+		device := base
+		mutate(&device)
+		if err := ValidateDevice(device); err == nil {
+			t.Errorf("mutation %d was accepted: %+v", index, device)
+		}
+	}
+}
+
 func TestValidateDeviceRejectsRuntimeCredentialForAutomaticUnlock(t *testing.T) {
 	device := Device{
 		Name:             "mac",
@@ -317,6 +355,16 @@ func TestLoadRejectsUnknownFields(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsTrailingData(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "devices.json")
+	if err := os.WriteFile(path, []byte("[] {}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&Store{Path: path}).Load(); err == nil || !strings.Contains(err.Error(), "trailing data") {
+		t.Fatalf("trailing configuration was accepted: %v", err)
+	}
+}
+
 func TestLoadRejectsSymlink(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("creating symlinks requires additional privileges on Windows")
@@ -332,6 +380,19 @@ func TestLoadRejectsSymlink(t *testing.T) {
 	}
 	if _, err := (&Store{Path: link}).Load(); err == nil {
 		t.Fatal("expected symlinked configuration to be rejected")
+	}
+}
+
+func TestLoadRejectsInsecurePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows DACL coverage is in securefs Windows-specific tests")
+	}
+	path := filepath.Join(t.TempDir(), "devices.json")
+	if err := os.WriteFile(path, []byte("[]"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&Store{Path: path}).Load(); err == nil || !strings.Contains(err.Error(), "insecure configuration") {
+		t.Fatalf("Load accepted insecure configuration permissions: %v", err)
 	}
 }
 

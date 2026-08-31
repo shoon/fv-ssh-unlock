@@ -68,7 +68,9 @@ positive evidence that normal macOS has booted. Keys are taken from
 `ssh-agent`; when `--identity` is omitted, standard regular files such as
 `~/.ssh/id_ed25519`, `id_ecdsa`, and `id_rsa` are also tried automatically.
 Use repeatable `--identity` flags for other keys. Explicit identity files must
-be unencrypted; add encrypted keys to `ssh-agent` instead.
+be unencrypted and privately owned: Unix rejects group/other access or a
+different owner, and Windows rejects an untrusted owner or DACL grant. Add
+encrypted keys to `ssh-agent` instead.
 
 ## Why status can be indeterminate
 

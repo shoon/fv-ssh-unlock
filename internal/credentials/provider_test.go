@@ -6,12 +6,24 @@ package credentials
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 )
+
+type reportOnlyProvider struct {
+	report ProviderReport
+}
+
+func (p reportOnlyProvider) Name() string                    { return p.report.Name }
+func (reportOnlyProvider) Get(string) (string, error)        { return "", ErrProviderUnavailable }
+func (reportOnlyProvider) Store(string, string) error        { return ErrProviderReadOnly }
+func (reportOnlyProvider) Delete(string) error               { return ErrProviderReadOnly }
+func (reportOnlyProvider) Assess(string) ReferenceAssessment { return ReferenceAssessment{} }
+func (p reportOnlyProvider) Report() ProviderReport          { return p.report }
 
 func TestRegistryReportsStableProviderSet(t *testing.T) {
 	reports := NewRegistry(Options{}).Reports()
@@ -26,6 +38,44 @@ func TestRegistryReportsStableProviderSet(t *testing.T) {
 	}
 	if reports[len(reports)-1].Built {
 		t.Fatal("TPM2 must not be advertised as built before a sealing provider exists")
+	}
+}
+
+func TestRegistryProviderLookupRuntimeAssessmentAndSecureStorage(t *testing.T) {
+	registry := NewRegistry(Options{})
+	if _, err := registry.Provider("missing"); err == nil {
+		t.Fatal("unknown provider was accepted")
+	}
+	runtimeProvider, err := registry.Provider(ProviderRuntime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtimeProvider.Name() != ProviderRuntime || runtimeProvider.Report().Security != SecurityRuntimeOnly {
+		t.Fatalf("unexpected runtime provider report: %+v", runtimeProvider.Report())
+	}
+	if assessment := runtimeProvider.Assess("missing"); assessment.Available || assessment.Details == "" {
+		t.Fatalf("missing runtime credential assessment = %+v", assessment)
+	}
+	t.Setenv(EnvName("runtime-device"), "runtime-secret")
+	value, err := runtimeProvider.Get("runtime-device")
+	if err != nil || value != "runtime-secret" {
+		t.Fatalf("runtime Get = %q, %v", value, err)
+	}
+	if assessment := runtimeProvider.Assess("runtime-device"); !assessment.Available || !assessment.Secure {
+		t.Fatalf("runtime credential assessment = %+v", assessment)
+	}
+
+	insecure := &Registry{providers: map[string]Provider{
+		"test": reportOnlyProvider{report: ProviderReport{Name: "test", Available: true, Persistent: true}},
+	}}
+	if insecure.HasSecureStorage() {
+		t.Fatal("insecure provider was treated as secure storage")
+	}
+	secure := &Registry{providers: map[string]Provider{
+		"test": reportOnlyProvider{report: ProviderReport{Name: "test", Available: true, Persistent: true, SecureStorage: true}},
+	}}
+	if !secure.HasSecureStorage() {
+		t.Fatal("available secure persistent provider was not detected")
 	}
 }
 
@@ -159,6 +209,22 @@ func TestFileProviderResolvesSystemdCredentialReference(t *testing.T) {
 	}
 }
 
+func TestSystemdCredentialReferenceEnvironmentValidation(t *testing.T) {
+	t.Setenv("CREDENTIALS_DIRECTORY", "")
+	if _, err := resolveCredentialFileReference("systemd:office-mac"); err == nil || !strings.Contains(err.Error(), "not set") {
+		t.Fatalf("unset credential directory error = %v", err)
+	}
+	t.Setenv("CREDENTIALS_DIRECTORY", "relative")
+	if _, err := resolveCredentialFileReference("systemd:office-mac"); err == nil || !strings.Contains(err.Error(), "absolute") {
+		t.Fatalf("relative credential directory error = %v", err)
+	}
+	for _, name := range []string{".", "..", strings.Repeat("x", 129), "bad/name"} {
+		if err := validateSystemdCredentialName(name); err == nil {
+			t.Errorf("systemd credential name %q was accepted", name)
+		}
+	}
+}
+
 func TestFileProviderHandlesOneLineEndingAndRejectsEmpty(t *testing.T) {
 	provider, err := NewRegistry(Options{AllowUnsafeCredentialStorage: true}).Provider(ProviderFile)
 	if err != nil {
@@ -205,5 +271,75 @@ func TestExternalProvidersAreReadOnly(t *testing.T) {
 		if err := provider.Delete("reference"); !errors.Is(err, ErrProviderReadOnly) {
 			t.Fatalf("%s Delete() error = %v, want ErrProviderReadOnly", name, err)
 		}
+	}
+}
+
+func TestOpenStableCredentialFileRejectsUnsafeShapes(t *testing.T) {
+	if _, err := openStableCredentialFile("relative"); err == nil {
+		t.Fatal("relative path was accepted")
+	}
+	missing := filepath.Join(t.TempDir(), "missing")
+	if _, err := openStableCredentialFile(missing); err == nil {
+		t.Fatal("missing path was accepted")
+	}
+	directory := t.TempDir()
+	if _, err := openStableCredentialFile(directory); err == nil {
+		t.Fatal("directory was accepted as a credential file")
+	}
+	large := filepath.Join(t.TempDir(), "large")
+	if err := os.WriteFile(large, make([]byte, maxCredentialFileSize+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openStableCredentialFile(large); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized credential was accepted: %v", err)
+	}
+}
+
+func TestCredentialPathHelpers(t *testing.T) {
+	base := t.TempDir()
+	child := filepath.Join(base, "child")
+	if err := os.WriteFile(child, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !pathWithin(base, child) {
+		t.Fatal("existing child was not within its base")
+	}
+	if pathWithin(base, base) {
+		t.Fatal("base directory itself was treated as a credential within the base")
+	}
+	if pathWithin(base, filepath.Join(base, "missing")) {
+		t.Fatal("missing path was treated as within the base")
+	}
+	if secure, detail := secureCredentialFileIn(base); secure || detail != "" {
+		t.Fatalf("ordinary disk credential was classified secure: secure=%v detail=%q", secure, detail)
+	}
+	if assessment := assessCredentialFile(filepath.Join(base, "missing")); assessment.Available || assessment.Details == "" {
+		t.Fatalf("missing credential assessment = %+v", assessment)
+	}
+}
+
+func TestReadPasswordFromPipe(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := os.Stdin
+	os.Stdin = reader
+	t.Cleanup(func() {
+		os.Stdin = previous
+		_ = reader.Close()
+	})
+	if _, err := io.WriteString(writer, "pipe-secret\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	password, err := ReadPassword()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if password != "pipe-secret" {
+		t.Fatalf("ReadPassword() = %q", password)
 	}
 }

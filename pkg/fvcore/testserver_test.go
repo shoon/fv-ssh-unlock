@@ -40,6 +40,9 @@ type testServerConfig struct {
 	extraQuestions int
 	// prompt overrides the normal Password: question.
 	prompt string
+	// repeatPrompt makes the server issue a second hidden Password: challenge
+	// after receiving the first answer. The client must refuse the replay.
+	repeatPrompt bool
 	// preAuthBanner is sent before authentication starts.
 	preAuthBanner string
 	// noBanner suppresses the banner, modelling a booted sshd that prompts for
@@ -134,6 +137,11 @@ func startTestServer(t *testing.T, cfg testServerConfig) *testServer {
 			ts.mu.Lock()
 			ts.gotPass = append(ts.gotPass, answers...)
 			ts.mu.Unlock()
+			if cfg.repeatPrompt {
+				if _, err := challenge("", "", []string{"Password: "}, []bool{false}); err != nil {
+					return nil, err
+				}
+			}
 			if len(answers) == 1 && answers[0] == cfg.password {
 				// Emit the success banner as an info-only challenge, then fail
 				// auth and disconnect, as on the real device.

@@ -11,7 +11,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"runtime"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -135,8 +134,8 @@ func readIdentityFile(path string) ([]byte, error) {
 	if info.Size() > maxIdentityFileSize {
 		return nil, fmt.Errorf("identity exceeds %d bytes", maxIdentityFileSize)
 	}
-	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("identity permissions %04o are too open; use 0600 or stricter", info.Mode().Perm())
+	if err := securefs.VerifyPrivateFile(file); err != nil {
+		return nil, fmt.Errorf("identity permissions are too open or owned by an untrusted account: %w", err)
 	}
 	data, err := io.ReadAll(io.LimitReader(file, maxIdentityFileSize+1))
 	if err != nil {

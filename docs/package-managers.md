@@ -94,8 +94,9 @@ over it — the tracked `deploy/systemd/fv-ssh-unlock.service` uses
 `/usr/local/bin` for source and archive installs. The packages do not create a
 user, write a credential, install configuration, or enable the daemon. Follow
 the [native systemd guide](containers-and-services.md#native-systemd) after
-installation, skipping its unit-installation step and starting from the user,
-credential, and `systemctl enable` steps.
+installation. Use its shared service-account and credential steps, skip the
+archive-only binary/unit installation block, and select `/usr/bin` in every
+drop-in and operator command.
 
 These files are installable packages, not hosted APT or DNF repositories.
 `apt upgrade` and `dnf upgrade` cannot discover newer GitHub release assets.

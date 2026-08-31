@@ -9,23 +9,29 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 )
 
 // FileMode is the mode of every private file this package creates or repairs.
 const FileMode = 0o600
 
-// VerifyPrivatePermissions rejects a file that group or other users can reach.
-// Windows security is carried by the inherited ACL rather than POSIX mode bits,
-// which os.Stat reports as 0666, so the check is a no-op there.
+// VerifyPrivatePermissions rejects POSIX permission bits that grant group or
+// other access. Call VerifyPrivateFile when the platform's ACL must also be
+// checked.
 func VerifyPrivatePermissions(info os.FileInfo) error {
-	if runtime.GOOS == "windows" {
-		return nil
-	}
 	if info.Mode().Perm()&0o077 != 0 {
 		return fmt.Errorf("permissions are %04o; expected no group or other access", info.Mode().Perm())
 	}
 	return nil
+}
+
+// VerifyPrivateFile rejects a file that principals other than the current
+// account and trusted system administrators can access. Unix uses ownership
+// and mode bits; Windows inspects the file's native owner and DACL.
+func VerifyPrivateFile(file *os.File) error {
+	if file == nil {
+		return errors.New("private file is required")
+	}
+	return verifyPrivateFile(file)
 }
 
 // OpenStable opens path read-only and validates the opened descriptor against
@@ -44,9 +50,12 @@ func OpenPrivate(path, purpose string, flags int) (*os.File, error) {
 }
 
 func openChecked(path, purpose string, flags int, repairMode bool) (*os.File, error) {
-	// #nosec G304 -- opening caller-controlled paths safely is this helper's purpose; the descriptor is validated against Lstat/SameFile below before use.
-	file, err := os.OpenFile(path, flags, FileMode)
+	file, err := openFileNoFollow(path, flags, FileMode)
 	if err != nil {
+		if linked, statErr := os.Lstat(path); statErr == nil &&
+			(!linked.Mode().IsRegular() || linked.Mode()&os.ModeSymlink != 0) {
+			return nil, fmt.Errorf("%s is not a stable regular file: %s", purpose, path)
+		}
 		return nil, err
 	}
 	fail := func(err error) (*os.File, error) {
@@ -65,7 +74,7 @@ func openChecked(path, purpose string, flags int, repairMode bool) (*os.File, er
 		return fail(fmt.Errorf("%s is not a stable regular file: %s", purpose, path))
 	}
 	if repairMode {
-		if err := file.Chmod(FileMode); err != nil {
+		if err := securePrivateFile(file); err != nil {
 			return fail(err)
 		}
 	}
@@ -99,7 +108,7 @@ func WritePrivate(path, purpose, pattern string, data []byte) error {
 		_ = temporary.Close()
 		return err
 	}
-	if err := temporary.Chmod(FileMode); err != nil {
+	if err := securePrivateFile(temporary); err != nil {
 		return failed(err)
 	}
 	if _, err := temporary.Write(data); err != nil {
@@ -114,5 +123,5 @@ func WritePrivate(path, purpose, pattern string, data []byte) error {
 	if err := ReplaceFile(temporaryPath, path); err != nil {
 		return err
 	}
-	return os.Chmod(path, FileMode)
+	return nil
 }

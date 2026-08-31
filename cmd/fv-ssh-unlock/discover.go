@@ -225,7 +225,26 @@ func merge(found map[string]*device, e *zeroconf.ServiceEntry) {
 
 	key := strings.ToLower(host)
 	if key == "" {
-		key = strings.ToLower(name)
+		// A partially populated Bonjour entry may not have its SRV hostname yet.
+		// Instance names are display labels rather than identities and are commonly
+		// duplicated (for example, two default "MacBook Pro" names), so use the
+		// advertised endpoint set rather than the label. Sorting makes announcements
+		// from _ssh and _sftp-ssh collapse even if their address order differs,
+		// while distinct address sets remain separate devices. An entry with neither
+		// hostname nor address has no usable identity or connection target, so drop it
+		// instead of risking a false merge by display name.
+		addresses := make([]string, 0, len(e.AddrIPv4)+len(e.AddrIPv6))
+		for _, group := range [][]net.IP{e.AddrIPv4, e.AddrIPv6} {
+			for _, ip := range group {
+				if ip != nil && !ip.IsUnspecified() {
+					addresses = append(addresses, ip.String())
+				}
+			}
+		}
+		sortAddrs(addresses)
+		if len(addresses) > 0 {
+			key = fmt.Sprintf("endpoint:%s:%d", strings.Join(addresses, ","), e.Port)
+		}
 	}
 	if key == "" {
 		return

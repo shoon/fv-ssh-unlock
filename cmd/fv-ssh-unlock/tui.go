@@ -24,13 +24,16 @@ import (
 	"golang.org/x/term"
 
 	"github.com/shoon/fv-ssh-unlock/internal/candidates"
+	"github.com/shoon/fv-ssh-unlock/internal/config"
 	"github.com/shoon/fv-ssh-unlock/internal/control"
 	"github.com/shoon/fv-ssh-unlock/internal/credentials"
 	"github.com/shoon/fv-ssh-unlock/internal/monitor"
 )
 
 type devicesAPIResponse struct {
-	SchemaVersion int `json:"schema_version"`
+	SchemaVersion int           `json:"schema_version"`
+	ProbeTimeout  time.Duration `json:"probe_timeout"`
+	UnlockTimeout time.Duration `json:"unlock_timeout"`
 	monitor.Snapshot
 }
 
@@ -65,7 +68,10 @@ func newTUICommand() *cobra.Command {
 			if refresh <= 0 {
 				return errors.New("--refresh must be greater than zero")
 			}
-			client := control.Client(socket, 5*time.Second)
+			// Individual requests carry operation-appropriate context deadlines.
+			// A global five-second http.Client timeout would otherwise cancel an
+			// enrollment or poll while its bounded SSH operation is still running.
+			client := control.Client(socket, 0)
 			once, _ := cmd.Flags().GetBool("once")
 			jsonOutput, _ := cmd.Flags().GetBool("json")
 			if once || jsonOutput {
@@ -159,16 +165,16 @@ func runInteractiveTUI(ctx context.Context, input io.Reader, output io.Writer, c
 			case 'r':
 				refreshNow()
 			case 'a':
-				message = enrollCandidateFromTUI(ctx, output, keys, client, snapshot.Candidates.Snapshot)
+				message = enrollCandidateFromTUI(ctx, output, keys, client, snapshot.Candidates.Snapshot, snapshot.Devices.ProbeTimeout)
 				refreshNow()
 			case 'i':
 				message = candidateActionFromTUI(ctx, output, keys, client, snapshot.Candidates.Snapshot, "ignore")
 				refreshNow()
 			case 'p':
-				message = deviceActionFromTUI(ctx, output, keys, client, snapshot.Devices.Snapshot, "poll")
+				message = deviceActionFromTUI(ctx, output, keys, client, snapshot.Devices.Snapshot, "poll", snapshot.Devices.ProbeTimeout, snapshot.Devices.UnlockTimeout)
 				refreshNow()
 			case 'l':
-				message = deviceActionFromTUI(ctx, output, keys, client, snapshot.Devices.Snapshot, "clear-latch")
+				message = deviceActionFromTUI(ctx, output, keys, client, snapshot.Devices.Snapshot, "clear-latch", snapshot.Devices.ProbeTimeout, snapshot.Devices.UnlockTimeout)
 				refreshNow()
 			}
 		}
@@ -251,7 +257,7 @@ func renderDashboard(output io.Writer, snapshot dashboardSnapshot, clear bool, m
 	return nil
 }
 
-func enrollCandidateFromTUI(ctx context.Context, output io.Writer, keys <-chan byte, client *http.Client, snapshot candidates.Snapshot) string {
+func enrollCandidateFromTUI(ctx context.Context, output io.Writer, keys <-chan byte, client *http.Client, snapshot candidates.Snapshot, probeTimeout time.Duration) string {
 	if len(snapshot.Candidates) == 0 {
 		return "No discovered candidates to add."
 	}
@@ -335,14 +341,19 @@ func enrollCandidateFromTUI(ctx context.Context, output io.Writer, keys <-chan b
 		Name: name, Host: host, User: user, Port: port, Fingerprint: candidate.Fingerprint,
 		CredentialSource: source, CredentialRef: reference, AutoUnlock: autoUnlock,
 	}
-	requestCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	requestCtx, cancel := context.WithTimeout(ctx, controlEnrollmentTimeout(probeTimeout))
 	defer cancel()
 	var response struct {
-		SchemaVersion int `json:"schema_version"`
+		SchemaVersion int                  `json:"schema_version"`
+		Device        config.Device        `json:"device"`
+		Candidate     candidates.Candidate `json:"candidate"`
 	}
 	endpoint := "/v1/candidates/" + url.PathEscape(candidate.ID) + "/enroll"
 	if err := control.DoJSON(requestCtx, client, http.MethodPost, endpoint, request, &response); err != nil {
 		return "Enrollment failed: " + err.Error()
+	}
+	if response.SchemaVersion != controlAPISchemaVersion {
+		return fmt.Sprintf("Enrollment failed: unsupported daemon API schema %d", response.SchemaVersion)
 	}
 	return fmt.Sprintf("Added %s; monitoring starts immediately.", name)
 }
@@ -384,7 +395,7 @@ func candidateActionFromTUI(ctx context.Context, output io.Writer, keys <-chan b
 	return fmt.Sprintf("Candidate %s is now %s.", shortFingerprint(response.Fingerprint), response.State)
 }
 
-func deviceActionFromTUI(ctx context.Context, output io.Writer, keys <-chan byte, client *http.Client, snapshot monitor.Snapshot, action string) string {
+func deviceActionFromTUI(ctx context.Context, output io.Writer, keys <-chan byte, client *http.Client, snapshot monitor.Snapshot, action string, probeTimeout, unlockTimeout time.Duration) string {
 	if len(snapshot.Devices) == 0 {
 		return "No managed devices available."
 	}
@@ -394,24 +405,38 @@ func deviceActionFromTUI(ctx context.Context, output io.Writer, keys <-chan byte
 	}
 	device := snapshot.Devices[index]
 	endpoint := "/v1/devices/" + url.PathEscape(device.Name) + "/" + action
-	requestCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	requestTimeout := 5 * time.Second
+	if action == "poll" {
+		requestTimeout = controlPollTimeout(probeTimeout, unlockTimeout)
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
 	if action == "poll" {
 		var response struct {
-			Device monitor.DeviceSnapshot `json:"device"`
-			Error  string                 `json:"error,omitempty"`
+			SchemaVersion int                    `json:"schema_version"`
+			Device        monitor.DeviceSnapshot `json:"device"`
+			Error         string                 `json:"error,omitempty"`
 		}
 		if err := control.DoJSON(requestCtx, client, http.MethodPost, endpoint, nil, &response); err != nil {
 			return "poll failed: " + err.Error()
+		}
+		if response.SchemaVersion != controlAPISchemaVersion {
+			return fmt.Sprintf("poll failed: unsupported daemon API schema %d", response.SchemaVersion)
 		}
 		if response.Error != "" {
 			return fmt.Sprintf("Poll completed for %s: %s (%s).", device.Name, response.Device.State, terminalSafeInline(response.Error))
 		}
 		return fmt.Sprintf("Poll completed for %s: %s.", device.Name, response.Device.State)
 	}
-	var response map[string]any
+	var response struct {
+		SchemaVersion int  `json:"schema_version"`
+		Changed       bool `json:"changed"`
+	}
 	if err := control.DoJSON(requestCtx, client, http.MethodPost, endpoint, nil, &response); err != nil {
 		return action + " failed: " + err.Error()
+	}
+	if response.SchemaVersion != controlAPISchemaVersion {
+		return fmt.Sprintf("%s failed: unsupported daemon API schema %d", action, response.SchemaVersion)
 	}
 	return fmt.Sprintf("%s completed for %s.", action, device.Name)
 }

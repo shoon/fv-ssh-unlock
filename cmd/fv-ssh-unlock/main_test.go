@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -38,6 +39,40 @@ func TestCommandHelpDocumentsObservedPrebootBehavior(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestProcessEntryPointRendersRootHelpWithoutExiting(t *testing.T) {
+	stdout, err := os.CreateTemp(t.TempDir(), "stdout-*.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stdout.Close() }()
+	stderr, err := os.CreateTemp(t.TempDir(), "stderr-*.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stderr.Close() }()
+
+	oldArgs, oldStdout, oldStderr := os.Args, os.Stdout, os.Stderr
+	os.Args = []string{"fv-ssh-unlock", "--help"}
+	os.Stdout, os.Stderr = stdout, stderr
+	defer func() {
+		os.Args, os.Stdout, os.Stderr = oldArgs, oldStdout, oldStderr
+	}()
+
+	main()
+	if _, err := stdout.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	rendered, err := io.ReadAll(stdout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, phrase := range []string{"remotely unlocks FileVault-protected macOS devices", "Available Commands:", "daemon", "healthcheck", "tui"} {
+		if !strings.Contains(string(rendered), phrase) {
+			t.Errorf("root help missing %q:\n%s", phrase, rendered)
+		}
 	}
 }
 
@@ -96,6 +131,55 @@ func TestCredentialStoreForDevice(t *testing.T) {
 				t.Fatalf("provider = %q, want %q", got, tt.wantSource)
 			}
 		})
+	}
+}
+
+func TestCredentialSourceLabelsAreExplicitAndTerminalSafe(t *testing.T) {
+	for name, test := range map[string]struct {
+		device config.Device
+		want   string
+	}{
+		"keyring":        {device: config.Device{CredentialSource: credentials.ProviderKeyring}, want: "OS keyring"},
+		"runtime":        {device: config.Device{CredentialSource: credentials.ProviderRuntime}, want: "runtime (environment or hidden prompt)"},
+		"file":           {device: config.Device{CredentialSource: credentials.ProviderFile, CredentialRef: "/run/secret\r\nforged"}, want: `external file (/run/secret\u000D\u000Aforged)`},
+		"legacy runtime": {device: config.Device{}, want: "legacy runtime (environment or hidden prompt)"},
+		"legacy keyring": {device: config.Device{Cred: "fvu-mac"}, want: "legacy OS keyring"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := credentialSourceLabel(test.device); got != test.want {
+				t.Fatalf("credential label = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestDeleteStoredCredentialSkipsNonKeyringAndUnavailableProviders(t *testing.T) {
+	stderr, err := os.CreateTemp(t.TempDir(), "stderr-*.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stderr.Close() }()
+	oldStderr := os.Stderr
+	os.Stderr = stderr
+	defer func() { os.Stderr = oldStderr }()
+
+	for _, device := range []config.Device{
+		{},
+		{Name: "runtime", CredentialSource: credentials.ProviderRuntime},
+		{Name: "file", CredentialSource: credentials.ProviderFile, CredentialRef: "/run/secrets/file"},
+		{Name: "unknown", CredentialSource: "not-a-provider"},
+	} {
+		deleteStoredCredential(device)
+	}
+	if _, err := stderr.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	output, err := io.ReadAll(stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(output) != 0 {
+		t.Fatalf("skipped credential deletion emitted a warning: %q", output)
 	}
 }
 
@@ -336,6 +420,31 @@ func TestUnlockDeviceWithRetryStopsOnCancelledContext(t *testing.T) {
 		unlockRetryOptions{maxAttempts: 5, retryDelay: time.Hour})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled unlock = %v, want context.Canceled", err)
+	}
+}
+
+func TestUnlockDeviceWithRetryPropagatesContextOnTheFinalAttempt(t *testing.T) {
+	device := config.Device{Name: "mac", Host: "192.0.2.1", User: "user", Port: 22}
+	for name, makeContext := range map[string]func() (context.Context, context.CancelFunc){
+		"cancelled": func() (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			return ctx, func() {}
+		},
+		"deadline exceeded": func() (context.Context, context.CancelFunc) {
+			return context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := makeContext()
+			defer cancel()
+			client := &fakeUnlockClient{unlockResponses: []fakeUnlockResponse{{status: fvcore.StatusUnknown, err: errors.New("dial failed")}}}
+			_, err := unlockDeviceWithRetry(ctx, io.Discard, client, &staticStore{pw: "secret"}, device, "mac",
+				unlockRetryOptions{maxAttempts: 1})
+			if !errors.Is(err, ctx.Err()) {
+				t.Fatalf("final attempt returned %v, want %v", err, ctx.Err())
+			}
+		})
 	}
 }
 

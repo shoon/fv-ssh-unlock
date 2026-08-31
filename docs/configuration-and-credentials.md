@@ -338,12 +338,13 @@ State is stored beneath the current user's home directory by default. Set the
 global `--data-dir /absolute/path` or `FV_SSH_UNLOCK_DATA_DIR` for a dedicated
 service/container directory:
 
-On Unix, an existing data directory must already be private (mode `0700`). The
-program creates a missing directory privately, but deliberately refuses an
-existing group/world-accessible directory instead of changing its permissions.
-This makes a mistaken value such as `/tmp` fail safely without chmodding a
-shared system directory. Create and assign the service directory explicitly
-before startup.
+On Unix, an existing data directory must already be owned by the effective user
+and private (mode `0700`). Private files must be owned by that user with no
+group or other access. The program creates a missing directory privately, but
+deliberately refuses an existing group/world-accessible directory instead of
+changing its permissions. This makes a mistaken value such as `/tmp` fail
+safely without chmodding a shared system directory. Create and assign the
+service directory explicitly before startup.
 
 | File | Contents |
 | --- | --- |
@@ -355,12 +356,15 @@ before startup.
 | `~/.fv-ssh-unlock/daemon.lock` | Process lock that prevents two persistent controllers from sharing one data directory. |
 | `~/.fv-ssh-unlock/control.sock` | Mode `0600` local daemon API socket while the service is running. |
 
-On Windows, `~` is the current user's profile directory. Configuration files
-are size limited, schema validated, written atomically, and restricted to the
-current user where the operating system supports Unix-style permissions. The
-parser rejects symbolic links, oversized files, unknown JSON fields, duplicate
-device names, ambiguous credential names, invalid ports, and malformed hosts.
-Prefer the `config` commands over manual JSON editing.
+On Windows, `~` is the current user's profile directory. Newly created private
+directories and files receive a protected native DACL for the current account,
+SYSTEM, and Administrators. Existing data directories and every private file
+read are rejected if their owner is untrusted or their DACL grants access to an
+untrusted principal. Configuration files are size limited, schema validated,
+and written atomically. The parser also rejects symbolic links/reparse points,
+non-regular files, oversized files, unknown JSON fields, duplicate device
+names, ambiguous credential names, invalid ports, and malformed hosts. Prefer
+the `config` commands over manual JSON editing.
 
 The tool has no telemetry and does not contact a project-operated service.
 `discover` sends standard mDNS queries on the local network; `scan` connects

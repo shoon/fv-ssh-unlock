@@ -98,6 +98,9 @@ Lifecycle, discovery, and candidate records use fields as applicable:
 | `observations` | Number of observations in a discovery round. |
 | `candidate_id`, `candidate_state`, `observed_at` | Candidate identity, review state, and observation time. |
 | `endpoint`, `hostname` | Untrusted network metadata when available. |
+| `fingerprint` | Observed SSH fingerprint when a dropped discovery observation supplied one. |
+| `replacement_candidate_id` | New candidate that displaced the unreviewed `candidate_id` on `candidate.evicted`. |
+| `reason` | Human capacity explanation on `candidate.dropped`; do not use it as the routing key. |
 | `auto_unlock` | Also records the selected policy on `candidate.enrolled`. |
 
 For example, a locked baseline or transition resembles:
@@ -157,6 +160,8 @@ is enabled; use `(run_id, sequence)` and the current state.
 | `discovery.failed` | `WARN` | Discovery round failed; adds `source` and `error`. |
 | `candidate.discovered` | `INFO` | A new SSH candidate entered the review inbox. |
 | `candidate.updated` | `DEBUG` | A known candidate was observed again. |
+| `candidate.evicted` | `INFO` | Inbox capacity evicted the oldest unreviewed candidate to admit a new one; adds the evicted `candidate_id`, `replacement_candidate_id`, `source`, and `observed_at`. Operator-verified, ignored, and configured candidates are never evicted. |
+| `candidate.dropped` | `WARN` | Inbox capacity could not admit an unmatched observation because every entry was operator-reviewed; adds `reason`, `source`, and, when available, `observed_at`, `endpoint`, `hostname`, and `fingerprint`. No existing candidate is removed. |
 | `candidate.expired` | `INFO` | An unreviewed candidate aged out. |
 | `candidate.expiration_failed` | `WARN` | Candidate expiration could not be saved or completed. |
 | `candidate.ignored` | `INFO` | Operator marked a candidate ignored. |
@@ -187,6 +192,11 @@ curl --fail --silent --show-error \
   http://localhost/v1/devices | jq .
 ```
 
+`GET /v1/candidates` also exposes the process-lifetime
+`dropped_observations` and `evicted_candidates` counters. Use them to detect
+capacity pressure even if a collector missed the individual records; they
+reset when the daemon restarts and do not replace retained event detail.
+
 The API is a local administrative interface. Do not proxy it to the SIEM or
 expose it on TCP; run a same-host reconciliation job and send only the required
 result through the normal collector.
@@ -205,6 +215,8 @@ Start with a small, state-aware policy:
   outage; confirm current state through `/v1/devices`.
 - Warn on repeated `discovery.failed`, `candidate.expiration_failed`,
   `candidate.state_update_failed`, or `candidate.label_refresh_failed`.
+- Warn on any `candidate.dropped`, and trend `candidate.evicted`; either can
+  indicate discovery noise or a candidate-inbox capacity that is too small.
 - Retain `device.unlock_started`, successful `device.unlock_result`,
   `device.booted`, `device.latch_cleared`, and candidate enrollment/review
   actions as operational audit events.

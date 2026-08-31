@@ -3,6 +3,7 @@
 package securefs
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -10,6 +11,85 @@ import (
 	"sync"
 	"testing"
 )
+
+func TestVerifyPrivateFileRejectsNilAndInsecureMode(t *testing.T) {
+	if err := VerifyPrivateFile(nil); err == nil {
+		t.Fatal("nil file was accepted")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows private-file behavior is covered by ACL-specific tests")
+	}
+	path := filepath.Join(privateTestDir(t), "private.json")
+	if err := os.WriteFile(path, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = file.Close() }()
+	if err := VerifyPrivateFile(file); err == nil {
+		t.Fatal("group/world-readable file was accepted")
+	}
+	if err := os.Chmod(path, FileMode); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyPrivateFile(file); err != nil {
+		t.Fatalf("private file was rejected: %v", err)
+	}
+}
+
+func TestOpenPrivateRepairsModeAndRejectsNonRegularPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows private-file behavior is covered by ACL-specific tests")
+	}
+	dir := privateTestDir(t)
+	path := filepath.Join(dir, "state.json")
+	if err := os.WriteFile(path, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	file, err := OpenPrivate(path, "test store", os.O_RDWR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != FileMode {
+		t.Fatalf("mode = %04o, want %04o", info.Mode().Perm(), FileMode)
+	}
+	if file, err := OpenPrivate(dir, "test store", os.O_RDONLY); err == nil {
+		_ = file.Close()
+		t.Fatal("directory was accepted as a private file")
+	}
+}
+
+func TestWritePrivateRejectsNonRegularTargetAndUnsafeDirectory(t *testing.T) {
+	dir := privateTestDir(t)
+	target := filepath.Join(dir, "state.json")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := WritePrivate(target, "test store", ".state-*.tmp", []byte("{}")); err == nil {
+		t.Fatal("directory target was accepted")
+	}
+
+	if runtime.GOOS == "windows" {
+		return
+	}
+	unsafeDir := filepath.Join(t.TempDir(), "shared")
+	if err := os.Mkdir(unsafeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err := WritePrivate(filepath.Join(unsafeDir, "state.json"), "test store", ".state-*.tmp", []byte("{}"))
+	if err == nil || errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unsafe directory was accepted or misreported: %v", err)
+	}
+}
 
 func TestWritePrivateReplacesAtomicallyWithPrivateMode(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "private", "state.json")

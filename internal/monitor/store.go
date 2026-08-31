@@ -37,7 +37,7 @@ func (s *FileStore) Load() (PersistentState, error) {
 	if err != nil {
 		return PersistentState{}, err
 	}
-	if err := securefs.VerifyPrivatePermissions(info); err != nil {
+	if err := securefs.VerifyPrivateFile(fh); err != nil {
 		return PersistentState{}, fmt.Errorf("insecure monitor state file %s: %w", s.Path, err)
 	}
 	if info.Size() > maxStateSize {

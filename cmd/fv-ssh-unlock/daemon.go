@@ -43,6 +43,9 @@ const daemonLogSchemaVersion = 1
 const (
 	defaultProbeTimeout  = 15 * time.Second
 	defaultUnlockTimeout = 45 * time.Second
+	// Control requests receive a little non-network overhead for JSON handling
+	// and durable state writes beyond the SSH operation budgets themselves.
+	controlOperationOverhead = 10 * time.Second
 )
 
 type daemonOptions struct {
@@ -219,7 +222,11 @@ func runDaemon(ctx context.Context, output io.Writer, opts daemonOptions) (retur
 			return fmt.Errorf("automatic unlock preflight for %q: %w", device.Name, err)
 		}
 	}
-	dialTimeout := minDuration(opts.probeTimeout, opts.unlockTimeout)
+	// The shared RealSSHClient must be permissive enough for the longer
+	// operation. Each monitor call has its own context deadline, so using the
+	// maximum here cannot lengthen a probe but using the minimum would silently
+	// cap an unlock at the probe budget (15s with the defaults).
+	dialTimeout := maxDuration(opts.probeTimeout, opts.unlockTimeout)
 	client, err := newSSHClient(false, false, false, opts.identityFiles, dialTimeout)
 	if err != nil {
 		return err
@@ -264,7 +271,8 @@ func runDaemon(ctx context.Context, output io.Writer, opts daemonOptions) (retur
 	defer func() { _ = listener.Close() }()
 	api := &daemonAPI{
 		startedAt: time.Now().UTC(), engine: engine, inbox: inbox, store: store, adapter: adapter,
-		identities: opts.identityFiles, probeTimeout: opts.probeTimeout, dialTimeout: dialTimeout, logger: logger,
+		identities: opts.identityFiles, probeTimeout: opts.probeTimeout, unlockTimeout: opts.unlockTimeout,
+		dialTimeout: dialTimeout, logger: logger,
 	}
 	eventBuffer := max(256, min(16384, len(configured)*8))
 	events, stopEvents := engine.Subscribe(eventBuffer)
@@ -279,7 +287,7 @@ func runDaemon(ctx context.Context, output io.Writer, opts daemonOptions) (retur
 		Handler:           api.routes(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      30 * time.Second,
+		WriteTimeout:      controlPollTimeout(opts.probeTimeout, opts.unlockTimeout),
 		IdleTimeout:       30 * time.Second,
 	}
 	errCh := make(chan error, 3)
@@ -754,13 +762,47 @@ func remainingTimeout(ctx context.Context, fallback time.Duration) time.Duration
 	return fallback
 }
 
-// minDuration is spelled out because discover.go defines a package-level max
-// for ints, and pairing it with the builtin min would read inconsistently.
-func minDuration(a, b time.Duration) time.Duration {
-	if a < b {
+// maxDuration returns the larger operation budget. A shared SSH client's dial
+// timeout uses it while the per-operation context enforces the smaller budget.
+func maxDuration(a, b time.Duration) time.Duration {
+	if a > b {
 		return a
 	}
 	return b
+}
+
+// durationSum adds positive duration budgets without allowing overflow to wrap
+// a control timeout negative and cancel a request immediately.
+func durationSum(values ...time.Duration) time.Duration {
+	const maximum = time.Duration(1<<63 - 1)
+	var total time.Duration
+	for _, value := range values {
+		if value <= 0 {
+			continue
+		}
+		if value > maximum-total {
+			return maximum
+		}
+		total += value
+	}
+	return total
+}
+
+func controlEnrollmentTimeout(probeTimeout time.Duration) time.Duration {
+	if probeTimeout <= 0 {
+		probeTimeout = defaultProbeTimeout
+	}
+	return durationSum(probeTimeout, controlOperationOverhead)
+}
+
+func controlPollTimeout(probeTimeout, unlockTimeout time.Duration) time.Duration {
+	if probeTimeout <= 0 {
+		probeTimeout = defaultProbeTimeout
+	}
+	if unlockTimeout <= 0 {
+		unlockTimeout = defaultUnlockTimeout
+	}
+	return durationSum(probeTimeout, unlockTimeout, controlOperationOverhead)
 }
 
 func toMonitorDevice(device config.Device) monitor.Device {
@@ -848,7 +890,37 @@ func runCandidateDiscovery(ctx context.Context, inbox *candidates.Inbox, opts da
 
 func logCandidateResults(logger *slog.Logger, source string, results []candidates.IngestResult) {
 	for _, result := range results {
+		if result.Dropped {
+			attrs := []any{
+				"event", "candidate.dropped",
+				"source", terminalSafeInline(source),
+				"reason", "candidate inbox is full of operator-reviewed entries",
+			}
+			if observation := result.DroppedObservation; observation != nil {
+				attrs = append(attrs, "observed_at", observation.ObservedAt)
+				if observation.Address != "" {
+					attrs = append(attrs, "endpoint", terminalSafeInline(net.JoinHostPort(observation.Address, fmt.Sprint(observation.Port))))
+				}
+				if observation.Hostname != "" {
+					attrs = append(attrs, "hostname", terminalSafeInline(observation.Hostname))
+				}
+				if observation.Fingerprint != "" {
+					attrs = append(attrs, "fingerprint", terminalSafeInline(observation.Fingerprint))
+				}
+			}
+			logger.Warn("SSH host candidate dropped at inbox capacity", attrs...)
+			continue
+		}
 		candidate := result.Candidate
+		for _, evictedID := range result.EvictedIDs {
+			logger.Info("unreviewed SSH host candidate evicted at inbox capacity",
+				"event", "candidate.evicted",
+				"candidate_id", terminalSafeInline(evictedID),
+				"replacement_candidate_id", terminalSafeInline(candidate.ID),
+				"source", terminalSafeInline(source),
+				"observed_at", candidate.LastSeen,
+			)
+		}
 		attrs := []any{
 			"candidate_id", terminalSafeInline(candidate.ID),
 			"candidate_state", terminalSafeInline(string(candidate.State)),
@@ -943,12 +1015,13 @@ type daemonAPI struct {
 	store      *config.Store
 	adapter    *daemonAdapter
 	identities []string
-	// probeTimeout and dialTimeout mirror the daemon's configured budgets so an
-	// enrollment probe uses the same limits as ordinary monitoring.
-	probeTimeout time.Duration
-	dialTimeout  time.Duration
-	logger       *slog.Logger
-	mutationMu   sync.Mutex
+	// Operation budgets mirror the daemon's configured values so enrollment and
+	// control clients use the same limits as ordinary monitoring.
+	probeTimeout  time.Duration
+	unlockTimeout time.Duration
+	dialTimeout   time.Duration
+	logger        *slog.Logger
+	mutationMu    sync.Mutex
 	// enrolling reserves candidates whose enrollment probe is in flight. The
 	// probe deliberately runs without mutationMu held, so this is what stops two
 	// concurrent requests from probing and enrolling the same candidate.
@@ -979,9 +1052,16 @@ func (a *daemonAPI) handleHealth(w http.ResponseWriter, _ *http.Request) {
 
 func (a *daemonAPI) handleDevices(w http.ResponseWriter, _ *http.Request) {
 	writeAPIJSON(w, http.StatusOK, struct {
-		SchemaVersion int `json:"schema_version"`
+		SchemaVersion int           `json:"schema_version"`
+		ProbeTimeout  time.Duration `json:"probe_timeout"`
+		UnlockTimeout time.Duration `json:"unlock_timeout"`
 		monitor.Snapshot
-	}{SchemaVersion: controlAPISchemaVersion, Snapshot: a.engine.Snapshot()})
+	}{
+		SchemaVersion: controlAPISchemaVersion,
+		ProbeTimeout:  a.probeTimeout,
+		UnlockTimeout: a.unlockTimeout,
+		Snapshot:      a.engine.Snapshot(),
+	})
 }
 
 func (a *daemonAPI) handleCandidates(w http.ResponseWriter, _ *http.Request) {
@@ -1185,9 +1265,17 @@ func (a *daemonAPI) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadGateway, err)
 		return
 	}
+	if err := r.Context().Err(); err != nil {
+		writeAPIError(w, http.StatusRequestTimeout, err)
+		return
+	}
 
 	a.mutationMu.Lock()
 	defer a.mutationMu.Unlock()
+	if err := r.Context().Err(); err != nil {
+		writeAPIError(w, http.StatusRequestTimeout, err)
+		return
+	}
 	// Re-validate everything after the probe. The candidate may have been
 	// ignored, re-observed with a different key, or configured by another path
 	// while the probe was running; enrolling on the pre-probe view would be a
@@ -1208,18 +1296,31 @@ func (a *daemonAPI) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusConflict, err)
 		return
 	}
+	if err := r.Context().Err(); err != nil {
+		a.failEnrollment(w, http.StatusRequestTimeout, device, pendingHostKey{}, err)
+		return
+	}
 	a.adapter.addDevice(device)
 	knownHosts, err := knownHostsPath()
 	if err != nil {
 		a.failEnrollment(w, http.StatusInternalServerError, device, pendingHostKey{}, err)
 		return
 	}
-	if err := commitPendingHostKey(knownHosts, pending); err != nil {
+	insertedHostKey, err := commitPendingHostKey(knownHosts, pending)
+	if err != nil {
 		a.failEnrollment(w, http.StatusBadGateway, device, pendingHostKey{}, err)
 		return
 	}
+	pinnedByEnrollment := pendingHostKey{}
+	if insertedHostKey {
+		pinnedByEnrollment = pending
+	}
+	if err := r.Context().Err(); err != nil {
+		a.failEnrollment(w, http.StatusRequestTimeout, device, pinnedByEnrollment, err)
+		return
+	}
 	if err := a.engine.AddDevice(toMonitorDevice(device)); err != nil {
-		a.failEnrollment(w, http.StatusInternalServerError, device, pending, err)
+		a.failEnrollment(w, http.StatusInternalServerError, device, pinnedByEnrollment, err)
 		return
 	}
 

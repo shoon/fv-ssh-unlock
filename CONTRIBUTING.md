@@ -64,6 +64,34 @@ go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 Please make sure `go build`, `go vet`, and `go test` all pass before opening a
 pull request. New code should include tests where practical.
 
+### Coverage regression gate
+
+CI measures aggregate statement coverage on Linux in plain module mode. The
+minimums intentionally leave room for small platform-specific differences
+while preventing an unnoticed broad regression:
+
+| Module | CI floor |
+| --- | ---: |
+| Main module | 70% |
+| `tools/mock-fv-ssh-server` | 70% |
+
+Run the same measurements locally from the repository root:
+
+```bash
+GOWORK=off go test -count=1 -covermode=atomic -coverprofile=main.cover ./...
+go tool cover -func=main.cover
+
+(
+  cd tools/mock-fv-ssh-server
+  GOWORK=off go test -count=1 -covermode=atomic -coverprofile=../../mock.cover ./...
+  go tool cover -func=../../mock.cover
+)
+```
+
+The final `total:` line in each report is the aggregate enforced by CI.
+`main.cover` and `mock.cover` are ignored local reports and can be removed
+after inspection.
+
 ### Build script
 
 ```bash
@@ -115,15 +143,16 @@ Tags matching `v*` run two independent workflows:
   the multi-platform digest through GitHub OIDC, verifies the exact workflow
   identity, and reports the immutable digest in the job summary.
 
-Both workflows accept only a pushed semantic-version tag and check that the
-tag, checked-out commit, GitHub event, and a commit on `origin/main` resolve to
-the same source.
-`workflow_dispatch` is verification-only and cannot publish an arbitrary tag.
-The Release workflow enforces this structurally: a `verify` job builds, tests,
-scans, and runs `goreleaser check`, while the separate `publish` job that
-uploads the release is gated on `github.event_name == 'push'` and is the only
-job granted `contents: write` and `id-token: write`. A manual dispatch
-therefore runs verification and stops.
+Both publishing jobs accept only a pushed semantic-version tag and check that
+the tag, checked-out commit, GitHub event, and a commit on `origin/main`
+resolve to the same source. `workflow_dispatch` is verification-only and
+cannot publish an arbitrary ref. The Release workflow enforces this
+structurally: its `verify` job builds, tests, scans, and runs `goreleaser check`
+for the manually selected branch or tag, while the separate `publish` job is
+gated on `github.event_name == 'push'` and is the only job granted
+`contents: write` and `id-token: write`. A manual dispatch therefore performs
+the checks and stops without publishing; the strict tag/main binding is also
+applied whenever a tag push can reach the publishing job.
 The repository requires `DOCKERHUB_USERNAME` and a narrowly scoped
 `DOCKERHUB_TOKEN` with read/write but no delete or administrative permission.
 Give the token a finite lifetime, record its expiry in maintainer operations,
@@ -145,11 +174,14 @@ builds a package snapshot. The package job installs and executes the AMD64 DEB
 and inspects both DEB/RPM architectures before a release tag is accepted.
 CI additionally runs `golangci-lint` (including `gosec` and `errorlint`) over
 the default and keyring build tags, exercises the keyring backend on Linux,
-macOS, and Windows, and analyzes Go and workflow sources with CodeQL. Pull
-requests also run dependency review. Run the linter locally with:
+macOS, and Windows, enforces aggregate Linux statement-coverage floors of 70%
+for both the main module and mock server, and analyzes Go and workflow
+sources with CodeQL. Pull requests also run dependency review. Run the linter
+locally with:
 
 ```bash
 go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2 run
+go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2 run --build-tags=keyring
 ```
 
 The Homebrew tap and Scoop bucket are separate public repositories so their

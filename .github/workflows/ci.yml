@@ -57,6 +57,69 @@ jobs:
           go vet ./...
           go test -race ./...
 
+  coverage:
+    name: Coverage regression gate
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    env:
+      MAIN_COVERAGE_FLOOR: "70"
+      MOCK_COVERAGE_FLOOR: "70"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.26.7'
+          cache-dependency-path: |
+            go.sum
+            tools/mock-fv-ssh-server/go.sum
+      - name: Measure and enforce aggregate statement coverage
+        shell: bash
+        run: |
+          main_profile="${RUNNER_TEMP}/fv-ssh-unlock-main.cover"
+          mock_profile="${RUNNER_TEMP}/fv-ssh-unlock-mock.cover"
+
+          go test -count=1 -covermode=atomic -coverprofile="$main_profile" ./...
+          (
+            cd tools/mock-fv-ssh-server
+            go test -count=1 -covermode=atomic -coverprofile="$mock_profile" ./...
+          )
+
+          main_report="$(go tool cover -func="$main_profile")"
+          mock_report="$(cd tools/mock-fv-ssh-server && go tool cover -func="$mock_profile")"
+          printf '%s\n' "$main_report"
+          printf '%s\n' "$mock_report"
+
+          main_total="$(printf '%s\n' "$main_report" | awk '$1 == "total:" { value=$3; sub(/%$/, "", value); print value }')"
+          mock_total="$(printf '%s\n' "$mock_report" | awk '$1 == "total:" { value=$3; sub(/%$/, "", value); print value }')"
+          if [[ ! "$main_total" =~ ^[0-9]+([.][0-9]+)?$ || ! "$mock_total" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+            echo "could not parse aggregate coverage totals" >&2
+            exit 1
+          fi
+
+          {
+            echo "### Go statement coverage"
+            echo
+            echo "| Module | Actual | Required |"
+            echo "| --- | ---: | ---: |"
+            echo "| Main | ${main_total}% | ${MAIN_COVERAGE_FLOOR}% |"
+            echo "| Mock SSH server | ${mock_total}% | ${MOCK_COVERAGE_FLOOR}% |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          failed=0
+          if ! awk -v actual="$main_total" -v floor="$MAIN_COVERAGE_FLOOR" \
+            'BEGIN { exit !(actual + 0 >= floor + 0) }'; then
+            echo "main module coverage ${main_total}% is below ${MAIN_COVERAGE_FLOOR}%" >&2
+            failed=1
+          fi
+          if ! awk -v actual="$mock_total" -v floor="$MOCK_COVERAGE_FLOOR" \
+            'BEGIN { exit !(actual + 0 >= floor + 0) }'; then
+            echo "mock module coverage ${mock_total}% is below ${MOCK_COVERAGE_FLOOR}%" >&2
+            failed=1
+          fi
+          exit "$failed"
+
   keyring-test:
     timeout-minutes: 15
     strategy:
@@ -97,8 +160,17 @@ jobs:
         run: go test -tags keyring ./...
 
   lint:
+    name: Lint ${{ matrix.variant }} build
     timeout-minutes: 15
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: default
+            args: ""
+          - variant: keyring
+            args: --build-tags=keyring
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -111,6 +183,7 @@ jobs:
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.13.2
+          args: ${{ matrix.args }}
 
   security:
     timeout-minutes: 15

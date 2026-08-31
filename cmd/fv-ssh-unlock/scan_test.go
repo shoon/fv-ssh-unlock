@@ -41,6 +41,37 @@ func TestScanHelpExplainsEvidenceAndSafety(t *testing.T) {
 	}
 }
 
+func TestScanCommandRejectsInvalidSafetyBoundsBeforeNetworking(t *testing.T) {
+	for name, args := range map[string][]string{
+		"missing cidr":    nil,
+		"invalid port":    {"--cidr", "192.0.2.1/32", "--port", "0"},
+		"invalid timeout": {"--cidr", "192.0.2.1/32", "--timeout", "0s"},
+		"zero concurrency": {
+			"--cidr", "192.0.2.1/32", "--concurrency", "0",
+		},
+		"excess concurrency": {
+			"--cidr", "192.0.2.1/32", "--concurrency", "257",
+		},
+		"unsafe user": {"--cidr", "192.0.2.1/32", "--user", " admin"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cmd := newScanCommand()
+			cmd.SetArgs(args)
+			cmd.SilenceUsage = true
+			cmd.SilenceErrors = true
+			if err := cmd.Execute(); err == nil {
+				t.Fatal("invalid scan arguments were accepted")
+			}
+		})
+	}
+	if err := validateScanUser("fv-ssh-probe"); err != nil {
+		t.Fatalf("valid scan user rejected: %v", err)
+	}
+	if err := validateScanUser("admin\nforged"); err == nil {
+		t.Fatal("control character in scan user was accepted")
+	}
+}
+
 func TestExpandScanCIDRs(t *testing.T) {
 	addresses, err := expandScanCIDRs([]string{"192.0.2.0/30", "192.0.2.1/32", "192.0.2.4/31"})
 	if err != nil {
@@ -170,5 +201,27 @@ func TestMatchPinnedTargetNamesUsesHostKeyIdentity(t *testing.T) {
 	got := matches[ssh.FingerprintSHA256(key)]
 	if !slices.Equal(got, []string{"lab-mac"}) {
 		t.Fatalf("fingerprint names = %v, want [lab-mac]", got)
+	}
+}
+
+func TestPrintScanFindingsRendersEmptyAndDetailedResults(t *testing.T) {
+	empty := captureStdout(t, func() { printScanFindings(nil, 12, false) })
+	if !strings.Contains(empty, "No open target ports found after scanning 12 address(es)") {
+		t.Fatalf("empty scan output = %q", empty)
+	}
+
+	finding := scanFinding{
+		address: netip.MustParseAddr("192.0.2.44"), port: 22,
+		version: "OpenSSH_10.2", match: "editing-mac", evidence: "FileVault locked banner",
+		fingerprint: "SHA256:test", keyType: "ssh-ed25519", detail: "password prompt observed",
+	}
+	rendered := captureStdout(t, func() { printScanFindings([]scanFinding{finding}, 12, true) })
+	for _, want := range []string{
+		"192.0.2.44", "OpenSSH_10.2", "editing-mac", "FileVault locked banner",
+		"ssh-ed25519 SHA256:test", "handshake: password prompt observed", "1 open port(s) across 12 address(es)",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("scan output missing %q:\n%s", want, rendered)
+		}
 	}
 }

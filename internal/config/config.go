@@ -88,6 +88,9 @@ func (s *Store) Load() ([]Device, error) {
 	if info.Size() > maxConfigSize {
 		return nil, fmt.Errorf("configuration exceeds %d bytes", maxConfigSize)
 	}
+	if err := securefs.VerifyPrivateFile(fh); err != nil {
+		return nil, fmt.Errorf("insecure configuration file %s: %w", s.Path, err)
+	}
 	f, err := io.ReadAll(io.LimitReader(fh, maxConfigSize+1))
 	if err != nil {
 		return nil, err

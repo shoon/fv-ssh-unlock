@@ -66,6 +66,9 @@ func newHealthcheckCommand() *cobra.Command {
 			if err := control.GetJSON(ctx, control.Client(socket, timeout), "/v1/health", &health); err != nil {
 				return err
 			}
+			if health.SchemaVersion != controlAPISchemaVersion {
+				return fmt.Errorf("unsupported daemon API schema %d", health.SchemaVersion)
+			}
 			if !health.OK {
 				return fmt.Errorf("daemon reported unhealthy")
 			}

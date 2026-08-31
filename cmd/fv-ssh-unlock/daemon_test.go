@@ -132,6 +132,71 @@ func TestDaemonStructuredLogEscapesUntrustedLineBreaks(t *testing.T) {
 	}
 }
 
+func TestMonitorLogEventNamesAndStateMessagesAreStable(t *testing.T) {
+	events := []struct {
+		event monitor.Event
+		want  string
+	}{
+		{monitor.Event{Type: monitor.EventProbe}, "device.probe"},
+		{monitor.Event{Type: monitor.EventUnlockStarted}, "device.unlock_started"},
+		{monitor.Event{Type: monitor.EventUnlockResult}, "device.unlock_result"},
+		{monitor.Event{Type: monitor.EventLatchChanged}, "device.latch_changed"},
+		{monitor.Event{Type: monitor.EventDeviceAdded}, "device.added"},
+		{monitor.Event{Type: monitor.EventType("future")}, "device.event"},
+	}
+	for _, state := range []struct {
+		state monitor.State
+		want  string
+	}{
+		{monitor.StateBooted, "device.booted"},
+		{monitor.StateLocked, "device.filevault_locked"},
+		{monitor.StateUnreachable, "device.unreachable"},
+		{monitor.StateIndeterminate, "device.indeterminate"},
+		{monitor.StateUnlocking, "device.unlocking"},
+		{monitor.StateBooting, "device.booting"},
+		{monitor.StateCredentialFailed, "device.credential_failed"},
+		{monitor.StateError, "device.error"},
+	} {
+		events = append(events, struct {
+			event monitor.Event
+			want  string
+		}{monitor.Event{Type: monitor.EventStateChanged, State: state.state}, state.want})
+	}
+	for _, test := range events {
+		if got := monitorLogEventName(test.event); got != test.want {
+			t.Errorf("monitorLogEventName(%+v) = %q, want %q", test.event, got, test.want)
+		}
+	}
+
+	for _, observation := range []struct {
+		state monitor.State
+		base  string
+	}{
+		{monitor.StateBooted, "booted"},
+		{monitor.StateLocked, "filevault_locked"},
+		{monitor.StateUnreachable, "unreachable"},
+		{monitor.StateIndeterminate, "indeterminate"},
+	} {
+		ordinary := monitor.Event{Type: monitor.EventObservationChanged, State: observation.state, Observation: observation.state}
+		if got := monitorLogEventName(ordinary); got != "device."+observation.base {
+			t.Errorf("ordinary observation %s = %q", observation.state, got)
+		}
+		changed := monitor.Event{Type: monitor.EventObservationChanged, State: monitor.StateError, Observation: observation.state}
+		if got := monitorLogEventName(changed); got != "device.observation_"+observation.base {
+			t.Errorf("changed observation %s = %q", observation.state, got)
+		}
+	}
+
+	for _, state := range []monitor.State{
+		monitor.StateBooted, monitor.StateLocked, monitor.StateUnreachable, monitor.StateIndeterminate,
+		monitor.StateUnlocking, monitor.StateBooting, monitor.StateCredentialFailed, monitor.StateError,
+	} {
+		if got := monitorStateLogMessage(state); got == "" {
+			t.Errorf("empty log message for state %s", state)
+		}
+	}
+}
+
 func TestCandidateLogEscapesUntrustedLineBreaks(t *testing.T) {
 	var output bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&output, nil))
@@ -159,6 +224,50 @@ func TestCandidateLogEscapesUntrustedLineBreaks(t *testing.T) {
 		if got := entry[field]; got != want {
 			t.Fatalf("%s = %#v, want %#v", field, got, want)
 		}
+	}
+}
+
+func TestCandidateCapacityLogsDropsAndEvictions(t *testing.T) {
+	observedAt := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
+	logCandidateResults(logger, "active-scan", []candidates.IngestResult{
+		{
+			Created:    true,
+			EvictedIDs: []string{"cand_evicted"},
+			Candidate: candidates.Candidate{
+				ID: "cand_replacement", State: candidates.StateIdentityPending, LastSeen: observedAt,
+			},
+		},
+		{
+			Dropped: true,
+			DroppedObservation: &candidates.Observation{
+				Source: "active-scan", ObservedAt: observedAt, Address: "192.0.2.44", Port: 22,
+				Hostname: "new-mac.local", Fingerprint: "SHA256:test",
+			},
+		},
+	})
+
+	lines := bytes.Split(bytes.TrimSpace(output.Bytes()), []byte{'\n'})
+	if len(lines) != 3 {
+		t.Fatalf("capacity logging emitted %d records, want 3: %s", len(lines), output.String())
+	}
+	wantEvents := []string{"candidate.evicted", "candidate.discovered", "candidate.dropped"}
+	for index, line := range lines {
+		var entry map[string]any
+		if err := json.Unmarshal(line, &entry); err != nil {
+			t.Fatal(err)
+		}
+		if entry["event"] != wantEvents[index] {
+			t.Fatalf("record %d event = %#v, want %q: %s", index, entry["event"], wantEvents[index], line)
+		}
+	}
+	var dropped map[string]any
+	if err := json.Unmarshal(lines[2], &dropped); err != nil {
+		t.Fatal(err)
+	}
+	if dropped["endpoint"] != "192.0.2.44:22" || dropped["hostname"] != "new-mac.local" || dropped["fingerprint"] != "SHA256:test" {
+		t.Fatalf("dropped-host context is incomplete: %+v", dropped)
 	}
 }
 
@@ -325,6 +434,117 @@ func TestDaemonAPILocalReadAndMutationRoutes(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"booted"`) {
 		t.Fatalf("poll = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestAPIStatusErrorPreservesCauseAndHTTPStatus(t *testing.T) {
+	cause := errors.New("invalid enrollment")
+	err := apiError(http.StatusConflict, cause)
+	if err.Error() != cause.Error() || !errors.Is(err, cause) {
+		t.Fatalf("API status error lost its cause: %v", err)
+	}
+	var statusErr *apiStatusError
+	if !errors.As(err, &statusErr) || statusErr.status != http.StatusConflict {
+		t.Fatalf("API status error = %#v", statusErr)
+	}
+
+	response := httptest.NewRecorder()
+	writeAPIStatusError(response, err)
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "invalid enrollment") {
+		t.Fatalf("typed API error = %d %s", response.Code, response.Body.String())
+	}
+	response = httptest.NewRecorder()
+	writeAPIStatusError(response, cause)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("untyped API error status = %d", response.Code)
+	}
+	if errorString(nil) != "" || errorString(cause) != cause.Error() {
+		t.Fatal("errorString did not preserve nil/error semantics")
+	}
+}
+
+func TestDecodeAPIJSONRequiresOneStrictJSONDocument(t *testing.T) {
+	validBody := `{"name":"mac","host":"192.0.2.1","user":"admin","fingerprint":"SHA256:test","credential_source":"runtime"}`
+	for name, test := range map[string]struct {
+		contentType string
+		body        string
+	}{
+		"missing content type": {body: validBody},
+		"unknown field":        {contentType: "application/json", body: `{"unknown":true}`},
+		"trailing document":    {contentType: "application/json", body: validBody + ` {}`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(test.body))
+			if test.contentType != "" {
+				request.Header.Set("Content-Type", test.contentType)
+			}
+			if err := decodeAPIJSON(request, &enrollCandidateRequest{}); err == nil {
+				t.Fatal("invalid API JSON was accepted")
+			}
+		})
+	}
+	request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(validBody))
+	request.Header.Set("Content-Type", "application/json; charset=utf-8")
+	var decoded enrollCandidateRequest
+	if err := decodeAPIJSON(request, &decoded); err != nil || decoded.Name != "mac" {
+		t.Fatalf("valid API JSON = %+v, %v", decoded, err)
+	}
+}
+
+func TestProbeTCPEndpointHonorsContextAndReachesLoopback(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = listener.Close() }()
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := probeTCPEndpoint(canceled, listener.Addr().String()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled TCP probe = %v", err)
+	}
+
+	accepted := make(chan error, 1)
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr == nil {
+			_ = connection.Close()
+		}
+		accepted <- acceptErr
+	}()
+	if err := probeTCPEndpoint(context.Background(), listener.Addr().String()); err != nil {
+		t.Fatalf("loopback TCP probe = %v", err)
+	}
+	select {
+	case err := <-accepted:
+		if err != nil {
+			t.Fatalf("loopback accept = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("loopback probe connected but was not accepted")
+	}
+}
+
+func TestCandidateAPISurfacesCapacityCounters(t *testing.T) {
+	inbox := candidates.New(candidates.Options{MaxCandidates: 1, TTL: -1})
+	fingerprint := "SHA256:" + base64.RawStdEncoding.EncodeToString(make([]byte, 32))
+	result, err := inbox.Ingest(candidates.Observation{Source: "test", Address: "192.0.2.1", Port: 22, Fingerprint: fingerprint})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inbox.MarkVerified(result.Candidate.ID); err != nil {
+		t.Fatal(err)
+	}
+	if dropped, err := inbox.Ingest(candidates.Observation{Source: "test", Address: "192.0.2.2", Port: 22}); err != nil || !dropped.Dropped {
+		t.Fatalf("capacity observation: result=%+v err=%v", dropped, err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/candidates", nil)
+	response := httptest.NewRecorder()
+	(&daemonAPI{inbox: inbox}).routes().ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"dropped_observations":1`) ||
+		!strings.Contains(response.Body.String(), `"evicted_candidates":0`) {
+		t.Fatalf("candidate capacity API = %d %s", response.Code, response.Body.String())
 	}
 }
 
@@ -529,9 +749,9 @@ func TestDaemonTimeoutFlagsReachTheAdapterAndDialer(t *testing.T) {
 
 	// This mirrors how runDaemon wires the options, so a regression that drops
 	// the configured budget on the way to the SSH layer is caught here.
-	dialTimeout := minDuration(opts.probeTimeout, opts.unlockTimeout)
-	if dialTimeout != 60*time.Second {
-		t.Fatalf("dial timeout = %v, want the shorter configured budget", dialTimeout)
+	dialTimeout := maxDuration(opts.probeTimeout, opts.unlockTimeout)
+	if dialTimeout != 90*time.Second {
+		t.Fatalf("dial timeout = %v, want the longer configured budget", dialTimeout)
 	}
 	adapter := newDaemonAdapter(&fakeDaemonSSH{}, nil, opts.probeTimeout, opts.unlockTimeout)
 	if adapter.probeTimeout != 60*time.Second || adapter.unlockTimeout != 90*time.Second {
@@ -542,8 +762,8 @@ func TestDaemonTimeoutFlagsReachTheAdapterAndDialer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if client.DialTimeout != 60*time.Second {
-		t.Fatalf("dial timeout = %v, want 60s", client.DialTimeout)
+	if client.DialTimeout != 90*time.Second {
+		t.Fatalf("dial timeout = %v, want 90s", client.DialTimeout)
 	}
 	fallback, err := newSSHClient(false, true, false, nil, 0)
 	if err != nil {
@@ -551,6 +771,68 @@ func TestDaemonTimeoutFlagsReachTheAdapterAndDialer(t *testing.T) {
 	}
 	if fallback.DialTimeout != defaultDialTimeout {
 		t.Fatalf("fallback dial timeout = %v, want %v", fallback.DialTimeout, defaultDialTimeout)
+	}
+}
+
+func TestDaemonSharedDialTimeoutDoesNotCapEitherOperation(t *testing.T) {
+	for _, test := range []struct {
+		probe  time.Duration
+		unlock time.Duration
+		want   time.Duration
+	}{
+		{probe: time.Second, unlock: time.Minute, want: time.Minute},
+		{probe: time.Minute, unlock: time.Second, want: time.Minute},
+	} {
+		if got := maxDuration(test.probe, test.unlock); got != test.want {
+			t.Fatalf("maxDuration(%v, %v) = %v, want %v", test.probe, test.unlock, got, test.want)
+		}
+	}
+}
+
+func TestControlTimeoutsCoverConfiguredOperationBudgets(t *testing.T) {
+	probe, unlock := 60*time.Second, 90*time.Second
+	if got := controlEnrollmentTimeout(probe); got <= probe {
+		t.Fatalf("enrollment control timeout = %v, must exceed probe budget %v", got, probe)
+	}
+	if got := controlPollTimeout(probe, unlock); got <= probe+unlock {
+		t.Fatalf("poll control timeout = %v, must exceed sequential operation budget %v", got, probe+unlock)
+	}
+	if got := durationSum(time.Duration(1<<63-1), time.Second); got != time.Duration(1<<63-1) {
+		t.Fatalf("overflowing duration sum wrapped to %v", got)
+	}
+	if got := durationSum(-time.Second, 2*time.Second); got != 2*time.Second {
+		t.Fatalf("non-positive duration was included in sum: %v", got)
+	}
+	if got := controlEnrollmentTimeout(0); got != defaultProbeTimeout+controlOperationOverhead {
+		t.Fatalf("default enrollment timeout = %v", got)
+	}
+	if got := controlPollTimeout(0, -time.Second); got != defaultProbeTimeout+defaultUnlockTimeout+controlOperationOverhead {
+		t.Fatalf("default poll timeout = %v", got)
+	}
+}
+
+func TestDevicesAPIReportsDaemonOperationBudgets(t *testing.T) {
+	engine, err := monitor.New(nil, apiProbe{}, nil,
+		&monitor.FileStore{Path: filepath.Join(privateDaemonTestDir(t), "state.json")}, monitor.DefaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &daemonAPI{
+		engine: engine, inbox: candidates.New(candidates.Options{}),
+		probeTimeout: 60 * time.Second, unlockTimeout: 90 * time.Second,
+	}
+	request := httptest.NewRequest(http.MethodGet, "/v1/devices", nil)
+	response := httptest.NewRecorder()
+	api.routes().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET /v1/devices = %d: %s", response.Code, response.Body.String())
+	}
+	var decoded devicesAPIResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.ProbeTimeout != 60*time.Second || decoded.UnlockTimeout != 90*time.Second {
+		t.Fatalf("API operation budgets = %v/%v", decoded.ProbeTimeout, decoded.UnlockTimeout)
 	}
 }
 

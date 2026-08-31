@@ -304,9 +304,11 @@ only networks you own or are authorized to test.
 ## Local data and privacy
 
 The application has no telemetry and contacts no project-operated service.
-Local configuration is size limited, schema validated, atomically written, and
-restricted to the current user where Unix-style permissions are available.
-Symbolic configuration files are rejected.
+Local configuration is size limited, schema validated, and atomically written.
+Unix reads require the effective owner and private mode bits; Windows reads
+validate the native owner and DACL, while newly written files receive a
+protected DACL. Symbolic links/reparse points and non-regular files are rejected
+before content is read.
 
 See [Local files and privacy](configuration-and-credentials.md#local-files-and-privacy)
 for the complete file list.

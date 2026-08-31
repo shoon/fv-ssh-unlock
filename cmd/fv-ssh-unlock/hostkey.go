@@ -134,6 +134,15 @@ func verifyHostKeyLocked(path string, acceptNew bool, expectedFingerprint string
 	}
 	verr := base(hostname, remote, key)
 	if verr == nil {
+		// An existing known_hosts entry proves that this is a trusted endpoint,
+		// but candidate enrollment has a second, independent invariant: the key
+		// must also be the one the operator verified from the discovery inbox.
+		// Do not bypass that check merely because the endpoint was pinned earlier
+		// under another workflow or alias.
+		if expectedFingerprint != "" && ssh.FingerprintSHA256(key) != expectedFingerprint {
+			return fmt.Errorf("%w: host %q presented %s, not the independently verified %s; refusing enrollment",
+				fvcore.ErrHostKeyMismatch, hostname, ssh.FingerprintSHA256(key), expectedFingerprint)
+		}
 		return nil
 	}
 	var keyErr *knownhosts.KeyError
@@ -191,12 +200,15 @@ func withKnownHostsLock(path string, fn func() error) error {
 // silently replaced: an entry that now disagrees fails closed.
 //
 // A zero pendingHostKey means the host was already pinned during verification
-// and there is nothing to record.
-func commitPendingHostKey(path string, pending pendingHostKey) error {
+// and there is nothing to record. The bool is true only when this call appended
+// the line, allowing a later rollback to remove only state owned by its
+// enrollment transaction.
+func commitPendingHostKey(path string, pending pendingHostKey) (bool, error) {
 	if pending.key == nil {
-		return nil
+		return false, nil
 	}
-	return withKnownHostsLock(path, func() error {
+	inserted := false
+	err := withKnownHostsLock(path, func() error {
 		base, err := knownhosts.New(path)
 		if err != nil {
 			return fmt.Errorf("read known_hosts: %w", err)
@@ -210,11 +222,13 @@ func commitPendingHostKey(path string, pending pendingHostKey) error {
 			if aerr := appendKnownHost(path, pending.hostname, pending.key); aerr != nil {
 				return fmt.Errorf("failed to record host key for %s: %w", pending.hostname, aerr)
 			}
+			inserted = true
 			return nil
 		}
 		return fmt.Errorf("%w: host key for %s changed while it was being enrolled; nothing was pinned: %w",
 			fvcore.ErrHostKeyMismatch, pending.hostname, verr)
 	})
+	return inserted, err
 }
 
 // removeKnownHost unpins a key recorded by commitPendingHostKey. It removes
@@ -227,13 +241,16 @@ func removeKnownHost(path, hostname string, key ssh.PublicKey) error {
 	}
 	target := []byte(knownhosts.Line([]string{knownhosts.Normalize(hostname)}, key))
 	return withKnownHostsLock(path, func() error {
-		f, err := securefs.OpenPrivate(path, "known_hosts", os.O_RDWR)
+		f, err := securefs.OpenPrivate(path, "known_hosts", os.O_RDONLY)
 		if err != nil {
 			return err
 		}
-		defer func() { _ = f.Close() }()
 		content, err := io.ReadAll(f)
 		if err != nil {
+			_ = f.Close()
+			return err
+		}
+		if err := f.Close(); err != nil {
 			return err
 		}
 		kept := make([][]byte, 0, bytes.Count(content, []byte{'\n'})+1)
@@ -248,16 +265,10 @@ func removeKnownHost(path, hostname string, key ssh.PublicKey) error {
 		if !removed {
 			return nil
 		}
-		if err := f.Truncate(0); err != nil {
-			return err
-		}
-		if _, err := f.Seek(0, io.SeekStart); err != nil {
-			return err
-		}
-		if _, err := f.Write(bytes.Join(kept, []byte{'\n'})); err != nil {
-			return err
-		}
-		return f.Sync()
+		// Replace the file atomically while the sidecar lock is held. Truncating
+		// and rewriting the live file would risk losing unrelated trust entries
+		// if the host ran out of space or an I/O error interrupted rollback.
+		return securefs.WritePrivate(path, "known_hosts", ".known-hosts-*.tmp", bytes.Join(kept, []byte{'\n'}))
 	})
 }
 

@@ -1058,6 +1058,15 @@ func unlockDeviceWithRetry(ctx context.Context, out io.Writer, client unlockRetr
 		}
 		results := fvcore.UnlockMany(ctx, client, store, []fvcore.Device{fvDevice}, successMsg, 20*time.Second, 1)
 		res := results[0]
+		// A caller cancellation is terminal for the whole command, including when
+		// it lands during the final/only attempt. Keep authoritative protocol
+		// results below, but never turn a canceled unknown result into an ordinary
+		// exhausted outcome that lets a multi-device invocation continue.
+		if res.Status == fvcore.StatusUnknown && !errors.Is(res.Error, fvcore.ErrHostKeyMismatch) {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return unlockAttemptResult{}, ctxErr
+			}
+		}
 
 		if opts.verbose {
 			fmt.Fprintf(out, "[verbose] banner:\n%s\n", terminalSafeMultiline(res.Output))

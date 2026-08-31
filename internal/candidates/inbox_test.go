@@ -172,6 +172,42 @@ func TestConfiguredFingerprintLifecycleAndPersistence(t *testing.T) {
 	}
 }
 
+func TestConfiguredFingerprintReplacementIsValidatedAndIdempotent(t *testing.T) {
+	inbox := New(Options{})
+	fingerprint := testFingerprint("configured-idempotent")
+	result, err := inbox.Ingest(Observation{Source: "scan", Address: "192.0.2.31", Fingerprint: fingerprint})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, configured := range [][]ConfiguredFingerprint{
+		{{Fingerprint: "invalid", DeviceNames: []string{"mac"}}},
+		{{Fingerprint: fingerprint}},
+		{{Fingerprint: fingerprint, DeviceNames: []string{"bad\nname"}}},
+	} {
+		if err := inbox.ReplaceConfiguredFingerprints(configured); err == nil {
+			t.Errorf("invalid configured fingerprints were accepted: %+v", configured)
+		}
+	}
+	configured := []ConfiguredFingerprint{{Fingerprint: fingerprint, DeviceNames: []string{"mac"}}}
+	if err := inbox.ReplaceConfiguredFingerprints(configured); err != nil {
+		t.Fatal(err)
+	}
+	sequence := inbox.Snapshot().Sequence
+	if err := inbox.ReplaceConfiguredFingerprints(configured); err != nil {
+		t.Fatal(err)
+	}
+	if got := inbox.Snapshot().Sequence; got != sequence {
+		t.Fatalf("idempotent replacement advanced sequence from %d to %d", sequence, got)
+	}
+	if err := inbox.ReplaceConfiguredFingerprints([]ConfiguredFingerprint{{Fingerprint: fingerprint, DeviceNames: []string{"renamed"}}}); err != nil {
+		t.Fatal(err)
+	}
+	got := inbox.Snapshot().Candidates
+	if len(got) != 1 || got[0].ID != result.Candidate.ID || len(got[0].ConfiguredNames) != 1 || got[0].ConfiguredNames[0] != "renamed" {
+		t.Fatalf("configured name replacement was not applied: %+v", got)
+	}
+}
+
 func TestIgnoreIsPermanentAcrossTTLAndRestart(t *testing.T) {
 	clock := newTestClock()
 	path := filepath.Join(t.TempDir(), "state", "candidates.json")
@@ -281,7 +317,21 @@ func TestIngestAtCapacityDropsCreationWithoutFailingTheRound(t *testing.T) {
 	if inbox.Dropped() != 1 {
 		t.Fatalf("dropped counter = %d, want 1", inbox.Dropped())
 	}
-	candidates := inbox.Snapshot().Candidates
+	snapshot := inbox.Snapshot()
+	if snapshot.DroppedObservations != 1 || snapshot.EvictedCandidates != 0 || snapshot.Sequence != 2 {
+		t.Fatalf("capacity counters were not surfaced in the snapshot: %+v", snapshot)
+	}
+	if results[1].DroppedObservation == nil || results[1].DroppedObservation.Address != "192.0.2.2" {
+		t.Fatalf("dropped observation was not preserved for logging: %+v", results[1])
+	}
+	events := inbox.EventsSince(0).Events
+	if len(events) != 2 || events[1].Type != EventDropped {
+		t.Fatalf("capacity drop event missing: %+v", events)
+	}
+	if events[1].Candidate != nil || events[1].CandidateID != "" {
+		t.Fatalf("capacity drop event incorrectly identified an admitted candidate: %+v", events[1])
+	}
+	candidates := snapshot.Candidates
 	if len(candidates) != 1 {
 		t.Fatalf("inbox holds %d candidates, want 1", len(candidates))
 	}
@@ -294,6 +344,53 @@ func TestIngestAtCapacityDropsCreationWithoutFailingTheRound(t *testing.T) {
 	}
 	if updated.Created || updated.Dropped || !updated.Candidate.LastSeen.After(candidates[0].LastSeen) {
 		t.Fatalf("existing candidate was not updated at capacity: %+v", updated)
+	}
+}
+
+func TestCapacityTelemetryIsJSONVisibleAndEventHistoryRemainsBounded(t *testing.T) {
+	inbox := New(Options{MaxCandidates: 1, MaxEvents: 1, TTL: -1})
+	first, err := inbox.Ingest(Observation{Source: "scan", Address: "192.0.2.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inbox.Ignore(first.Candidate.ID); err != nil {
+		t.Fatal(err)
+	}
+	result, err := inbox.Ingest(Observation{Source: "scan", Address: "192.0.2.2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Dropped {
+		t.Fatalf("capacity observation was not dropped: %+v", result)
+	}
+	payload := mustJSON(t, inbox.Snapshot())
+	if !strings.Contains(payload, `"dropped_observations":1`) || !strings.Contains(payload, `"evicted_candidates":0`) {
+		t.Fatalf("capacity counters missing from snapshot JSON: %s", payload)
+	}
+	batch := inbox.EventsSince(1)
+	if !batch.ResetRequired || len(batch.Events) != 0 || batch.LatestSequence != inbox.Snapshot().Sequence {
+		t.Fatalf("stale capacity-event cursor did not require a snapshot reset: %+v", batch)
+	}
+	latest := inbox.EventsSince(batch.LatestSequence)
+	if latest.ResetRequired || len(latest.Events) != 0 || latest.LatestSequence != batch.LatestSequence {
+		t.Fatalf("latest cursor returned unexpected capacity events: %+v", latest)
+	}
+}
+
+func TestCandidateTransitionsRejectMissingAndInvalidStates(t *testing.T) {
+	inbox := New(Options{})
+	if _, err := inbox.Ignore("cand_missing"); err == nil {
+		t.Fatal("missing candidate was ignored")
+	}
+	result, err := inbox.Ingest(Observation{Source: "scan", Address: "192.0.2.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inbox.Restore(result.Candidate.ID); err == nil {
+		t.Fatal("non-ignored candidate was restored")
+	}
+	if _, err := inbox.MarkVerified(result.Candidate.ID); err == nil {
+		t.Fatal("candidate without a fingerprint was verified")
 	}
 }
 
@@ -332,6 +429,12 @@ func TestIngestAtCapacityEvictsOldestUnreviewedCandidate(t *testing.T) {
 	}
 	if inbox.Dropped() != 0 {
 		t.Fatalf("dropped counter = %d, want 0", inbox.Dropped())
+	}
+	if inbox.Evicted() != 1 || inbox.Snapshot().EvictedCandidates != 1 {
+		t.Fatalf("evicted counter = %d snapshot=%+v, want 1", inbox.Evicted(), inbox.Snapshot())
+	}
+	if len(fresh.EvictedIDs) != 1 || fresh.EvictedIDs[0] != unreviewed.Candidate.ID {
+		t.Fatalf("evicted ID was not returned for logging: %+v", fresh)
 	}
 	events := inbox.EventsSince(0).Events
 	last := events[len(events)-2]
@@ -394,6 +497,65 @@ func TestFailedDurableWriteRollsBackMemory(t *testing.T) {
 	if snapshot := inbox.Snapshot(); len(snapshot.Candidates) != 0 || snapshot.Sequence != 0 {
 		t.Fatalf("memory advanced after failed write: %+v", snapshot)
 	}
+}
+
+func TestFailedDurableWriteRollsBackCapacityCounters(t *testing.T) {
+	t.Run("drop", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "private", "candidates.json")
+		inbox, err := Open(path, Options{MaxCandidates: 1, TTL: -1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := inbox.Ingest(Observation{Source: "scan", Address: "192.0.2.1", Fingerprint: testFingerprint("pinned")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := inbox.MarkVerified(result.Candidate.ID); err != nil {
+			t.Fatal(err)
+		}
+		before := inbox.Snapshot()
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := inbox.Ingest(Observation{Source: "scan", Address: "192.0.2.2"}); err == nil {
+			t.Fatal("expected durable drop write to fail")
+		}
+		after := inbox.Snapshot()
+		if after.DroppedObservations != before.DroppedObservations ||
+			after.EvictedCandidates != before.EvictedCandidates || after.Sequence != before.Sequence {
+			t.Fatalf("capacity counters advanced after failed write: before=%+v after=%+v", before, after)
+		}
+	})
+
+	t.Run("eviction", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "private", "candidates.json")
+		inbox, err := Open(path, Options{MaxCandidates: 1, TTL: -1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		original, err := inbox.Ingest(Observation{Source: "scan", Address: "192.0.2.1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		before := inbox.Snapshot()
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := inbox.Ingest(Observation{Source: "scan", Address: "192.0.2.2"}); err == nil {
+			t.Fatal("expected durable eviction write to fail")
+		}
+		after := inbox.Snapshot()
+		if after.EvictedCandidates != before.EvictedCandidates || after.Sequence != before.Sequence ||
+			len(after.Candidates) != 1 || after.Candidates[0].ID != original.Candidate.ID {
+			t.Fatalf("eviction state advanced after failed write: before=%+v after=%+v", before, after)
+		}
+	})
 }
 
 func TestConcurrentIngestDeduplicatesFingerprint(t *testing.T) {

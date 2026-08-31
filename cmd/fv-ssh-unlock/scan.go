@@ -430,6 +430,9 @@ func loadPinnedTargetNames() (map[string][]string, error) {
 	if info.Size() > maxKnownHostsSize {
 		return nil, fmt.Errorf("known_hosts exceeds %d bytes", maxKnownHostsSize)
 	}
+	if err := securefs.VerifyPrivateFile(file); err != nil {
+		return nil, fmt.Errorf("insecure known_hosts file %s: %w", path, err)
+	}
 	data, err := io.ReadAll(io.LimitReader(file, maxKnownHostsSize+1))
 	if err != nil {
 		return nil, err

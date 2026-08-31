@@ -63,7 +63,7 @@ func loadState(path string) (*diskState, error) {
 	if info.Size() > maxStoreSize {
 		return nil, fmt.Errorf("candidate inbox exceeds %d bytes", maxStoreSize)
 	}
-	if err := securefs.VerifyPrivatePermissions(info); err != nil {
+	if err := securefs.VerifyPrivateFile(file); err != nil {
 		return nil, fmt.Errorf("insecure candidate inbox %s: %w", path, err)
 	}
 	data, err := io.ReadAll(io.LimitReader(file, maxStoreSize+1))

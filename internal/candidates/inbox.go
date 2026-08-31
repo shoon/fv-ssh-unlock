@@ -30,6 +30,7 @@ type Inbox struct {
 	clock      func() time.Time
 	sequence   uint64
 	dropped    uint64
+	evicted    uint64
 	entries    map[string]*Candidate
 	configured map[string][]string
 	events     []Event
@@ -149,6 +150,8 @@ func (b *Inbox) IngestMany(observations []Observation) ([]IngestResult, error) {
 
 	beforeEntries := cloneEntries(b.entries)
 	beforeSequence := b.sequence
+	beforeDropped := b.dropped
+	beforeEvicted := b.evicted
 	var pending []Event
 	b.expireLocked(now, &pending)
 	results := make([]IngestResult, 0, len(normalized))
@@ -158,6 +161,8 @@ func (b *Inbox) IngestMany(observations []Observation) ([]IngestResult, error) {
 		if err != nil {
 			b.entries = beforeEntries
 			b.sequence = beforeSequence
+			b.dropped = beforeDropped
+			b.evicted = beforeEvicted
 			return nil, err
 		}
 		results = append(results, result)
@@ -166,6 +171,8 @@ func (b *Inbox) IngestMany(observations []Observation) ([]IngestResult, error) {
 	if err := b.saveLocked(); err != nil {
 		b.entries = beforeEntries
 		b.sequence = beforeSequence
+		b.dropped = beforeDropped
+		b.evicted = beforeEvicted
 		return nil, err
 	}
 	b.appendEventsLocked(pending)
@@ -210,6 +217,7 @@ func (b *Inbox) ingestLocked(observation Observation, touched map[string]struct{
 	}
 
 	var evicted []Event
+	var evictedIDs []string
 	if candidate == nil {
 		// A full inbox must never fail the round: an attacker who can fabricate
 		// distinct observations would otherwise freeze LastSeen and state
@@ -220,9 +228,13 @@ func (b *Inbox) ingestLocked(observation Observation, touched map[string]struct{
 			victim := b.evictionTargetLocked(touched)
 			if victim == nil {
 				b.dropped++
-				return IngestResult{Dropped: true}, nil, nil
+				event := b.makeEventLocked(EventDropped, nil, nil, observation.ObservedAt)
+				observed := observation
+				return IngestResult{Dropped: true, DroppedObservation: &observed}, []Event{event}, nil
 			}
 			delete(b.entries, victim.ID)
+			b.evicted++
+			evictedIDs = append(evictedIDs, victim.ID)
 			evicted = append(evicted, b.makeEventLocked(EventEvicted, nil, nil, observation.ObservedAt, victim.ID))
 		}
 		id, err := newCandidateID()
@@ -270,7 +282,10 @@ func (b *Inbox) ingestLocked(observation Observation, touched map[string]struct{
 	}
 	event := b.makeEventLocked(typeForEvent, candidate, mergedIDs, observation.ObservedAt)
 	touched[candidate.ID] = struct{}{}
-	result := IngestResult{Candidate: cloneCandidate(*candidate), Created: created, MergedIDs: cloneStrings(mergedIDs)}
+	result := IngestResult{
+		Candidate: cloneCandidate(*candidate), Created: created,
+		EvictedIDs: cloneStrings(evictedIDs), MergedIDs: cloneStrings(mergedIDs),
+	}
 	return result, append(evicted, event), nil
 }
 
@@ -307,6 +322,14 @@ func (b *Inbox) Dropped() uint64 {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.dropped
+}
+
+// Evicted reports how many unreviewed candidates were displaced to admit a
+// newer observation during the life of this process.
+func (b *Inbox) Evicted() uint64 {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.evicted
 }
 
 // MarkVerified records that an operator verified the displayed fingerprint.
@@ -486,7 +509,10 @@ func (b *Inbox) Snapshot() Snapshot {
 		}
 		return candidates[i].LastSeen.After(candidates[j].LastSeen)
 	})
-	return Snapshot{Sequence: b.sequence, Generated: b.now(), Candidates: candidates}
+	return Snapshot{
+		Sequence: b.sequence, Generated: b.now(), DroppedObservations: b.dropped,
+		EvictedCandidates: b.evicted, Candidates: candidates,
+	}
 }
 
 // EventsSince returns the retained changes after sequence. ResetRequired means

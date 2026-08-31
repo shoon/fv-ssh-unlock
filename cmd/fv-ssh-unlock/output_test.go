@@ -5,6 +5,7 @@
 package main
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -42,13 +43,31 @@ func TestTerminalSafeMultilineNormalizesCarriageReturns(t *testing.T) {
 	}
 }
 
+func TestTerminalSafeErrorHandlesNilAndSanitizesErrorText(t *testing.T) {
+	if got := terminalSafeError(nil); got != "" {
+		t.Fatalf("nil error rendered as %q", got)
+	}
+	got := terminalSafeError(errors.New("dial failed\r\nlevel=INFO\x1b[2J"))
+	if got != `dial failed\u000D\u000Alevel=INFO\u001B[2J` {
+		t.Fatalf("sanitized error = %q", got)
+	}
+}
+
 func TestDeviceIdentifiersAndIPv6Endpoint(t *testing.T) {
-	device := config.Device{Name: "my-mac", Host: "2001:db8::1", Port: 22}
+	device := config.Device{Name: "my-mac", Host: "2001:db8::1"}
 	if got := deviceCredentialID(device); got != "fvu-my-mac" {
 		t.Fatalf("legacy empty credential ID resolved to %q", got)
 	}
 	if got := deviceEndpoint(device); got != "[2001:db8::1]:22" {
 		t.Fatalf("IPv6 endpoint = %q", got)
+	}
+	device.Cred = "custom-reference"
+	device.Port = 2222
+	if got := deviceCredentialID(device); got != "custom-reference" {
+		t.Fatalf("explicit credential ID resolved to %q", got)
+	}
+	if got := deviceEndpoint(device); got != "[2001:db8::1]:2222" {
+		t.Fatalf("explicit IPv6 endpoint = %q", got)
 	}
 }
 
