@@ -97,12 +97,40 @@ Because this tool handles disk-encryption passwords, please report security
 issues privately rather than in a public issue. Follow the contact and
 disclosure guidance in [SECURITY.md](SECURITY.md).
 
-## Release signing
+## Release signing and containers
 
-Tags matching `v*` run the GitHub release workflow. GoReleaser builds archives
-for macOS, Linux, and Windows on AMD64 and ARM64, creates checksums and SBOMs,
-and publishes the GitHub release. Cosign signs the checksum file through GitHub
-OIDC, so no long-lived signing key is stored in repository secrets.
+Create a signed semantic-version tag such as `v1.2.3` or `v1.2.3-rc.1` only
+after the tagged commit has passed every required check. Never move or reuse a
+published tag; issue the next patch or release-candidate version instead.
+
+Tags matching `v*` run two independent workflows:
+
+- The Release workflow uses GoReleaser to build archives for macOS, Linux, and
+  Windows on AMD64 and ARM64, creates checksums and archive SBOMs, and publishes
+  the GitHub release. Cosign signs the checksum file through GitHub OIDC.
+- The Container workflow verifies the minimal runtime contract, builds the
+  public `shoonimages/fv-ssh-unlock:<tag>` image for `linux/amd64` and
+  `linux/arm64`, attaches SPDX SBOM and maximal provenance attestations, signs
+  the multi-platform digest through GitHub OIDC, verifies the exact workflow
+  identity, and reports the immutable digest in the job summary.
+
+Container publication accepts only the pushed semantic-version tag and checks
+that the tag, checked-out commit, and GitHub event resolve to the same commit.
+`workflow_dispatch` is verification-only and cannot publish an arbitrary tag.
+The repository requires `DOCKERHUB_USERNAME` and a narrowly scoped
+`DOCKERHUB_TOKEN` with read/write but no delete or administrative permission.
+Give the token a finite lifetime, record its expiry in maintainer operations,
+and replace the Actions secret before it expires.
+The Docker Hub repository must already exist and be public; the workflow does
+not change registry visibility. Docker Hub's immutable-tag policy protects
+`v*` release tags from overwrite; do not disable or broaden that rule as part
+of an ordinary release.
+
+The GitHub release checksum signature and the container signature cover
+different artifacts. Verify the native archives as documented in
+`docs/getting-started.md`, and verify the digest-pinned image as documented in
+`docs/containers-and-services.md`. No long-lived signing key is stored in
+repository secrets.
 
 Dependabot checks the main Go module, mock-server Go module, and GitHub Actions
 weekly. CI also scans every build variant for reachable vulnerabilities.

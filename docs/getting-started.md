@@ -5,6 +5,11 @@
 This guide covers client installation and the one-time work needed to make a
 Mac available for FileVault-over-SSH recovery.
 
+> [!CAUTION]
+> This guide currently targets the **v0.2.0-rc.1 prerelease**. Stable `v0.1.0`
+> does not include the daemon, TUI, candidate inbox, or secure-provider model.
+> Use the exact version below rather than `/releases/latest` or `@latest`.
+
 ## Contents
 
 - [Requirements](#requirements)
@@ -42,8 +47,8 @@ and `man apple_ssh_and_filevault` on a macOS 26 Mac for platform details.
 
 ### Release archive
 
-Download the current archive from
-[GitHub Releases](https://github.com/shoon/fv-ssh-unlock/releases/latest).
+Download the `v0.2.0-rc.1` archive from its
+[GitHub prerelease page](https://github.com/shoon/fv-ssh-unlock/releases/tag/v0.2.0-rc.1).
 Choose the file matching the client computer's operating system and
 architecture, extract it, and place the binary on your `PATH`.
 
@@ -55,7 +60,8 @@ include OS-keyring support.
 ### Build from a source checkout
 
 ```bash
-git clone https://github.com/shoon/fv-ssh-unlock.git
+git clone --branch v0.2.0-rc.1 --depth 1 \
+  https://github.com/shoon/fv-ssh-unlock.git
 cd fv-ssh-unlock
 go build -tags keyring -o fv-ssh-unlock ./cmd/fv-ssh-unlock
 ```
@@ -76,7 +82,7 @@ Binaries are written to `dist/`.
 ### Go install
 
 ```bash
-go install github.com/shoon/fv-ssh-unlock/cmd/fv-ssh-unlock@latest
+go install github.com/shoon/fv-ssh-unlock/cmd/fv-ssh-unlock@v0.2.0-rc.1
 ```
 
 `go install` produces a binary with runtime and external-file providers because

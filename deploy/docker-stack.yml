@@ -4,13 +4,21 @@
 # stack. Do not put their values in this file.
 services:
   controller:
-    image: "${FV_SSH_UNLOCK_IMAGE:?set FV_SSH_UNLOCK_IMAGE to a digest-pinned private image}"
+    # docker stack uses the legacy Compose interpolator, which does not
+    # reliably implement the ${VAR:?message} form. Validate this required
+    # variable in the invoking shell before deploying.
+    image: "${FV_SSH_UNLOCK_IMAGE}"
     user: "65532:65532"
     read_only: true
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "5"
     environment:
       FV_SSH_UNLOCK_DATA_DIR: /data
     command:

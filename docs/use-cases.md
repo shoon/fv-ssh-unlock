@@ -10,6 +10,7 @@ the detailed guide for decisions and failure handling.
 - [Discover candidate Macs before setup](#discover-candidate-macs-before-setup)
 - [Keep homelab Macs available after a power outage](#keep-homelab-macs-available-after-a-power-outage)
 - [Enroll a new Mac from the persistent candidate inbox](#enroll-a-new-mac-from-the-persistent-candidate-inbox)
+- [Operate a Mac hosting service](#operate-a-mac-hosting-service)
 - [Add several known Macs](#add-several-known-macs)
 - [Prepare a new Mac](#prepare-a-new-mac)
 - [Enroll a host key and identify state](#enroll-a-host-key-and-identify-state)
@@ -61,32 +62,43 @@ Prepare the site before relying on unattended recovery:
 6. Add each device with automatic unlock enabled and independently pin its host
    key while macOS is booted.
 
-For a systemd credential reference, configuration might look like:
+Install the static binary and native service as described in
+[Native systemd](containers-and-services.md#native-systemd). Before starting
+the service, create the device and its pinned host key under the same service
+identity and data directory that the daemon will use:
 
 ```bash
-fv-ssh-unlock config add m4alpha \
+sudo install -d -o fv-ssh-unlock -g fv-ssh-unlock -m 0700 \
+  /var/lib/fv-ssh-unlock
+
+sudo -u fv-ssh-unlock /usr/local/bin/fv-ssh-unlock \
+  --data-dir /var/lib/fv-ssh-unlock config add m4alpha \
   --host 192.168.1.42 \
   --user unlockuser \
   --credential-source file \
   --credential-file systemd:m4alpha \
   --auto-unlock
 
-fv-ssh-unlock status m4alpha \
-  --identity /var/lib/fv-ssh-unlock/id_ed25519 \
+sudo -u fv-ssh-unlock /usr/local/bin/fv-ssh-unlock \
+  --data-dir /var/lib/fv-ssh-unlock status m4alpha \
   --accept-new-host-key
 ```
 
-Run the one-pass test while the Mac is booted, then supervise the foreground
-daemon with systemd or a container runtime:
+Compare the complete fingerprint before the second command. Provision
+`systemd:m4alpha` and the dedicated macOS verification identity as encrypted
+systemd credentials, then start the supervised daemon. The detailed service
+guide shows the required `LoadCredentialEncrypted=` and `%d` identity settings.
 
 ```bash
-fv-ssh-unlock daemon --once \
-  --identity /var/lib/fv-ssh-unlock/id_ed25519
-
-fv-ssh-unlock daemon \
-  --identity /var/lib/fv-ssh-unlock/id_ed25519 \
-  --scan-cidr 192.168.1.0/24
+sudo systemctl enable --now fv-ssh-unlock
+sudo -u fv-ssh-unlock /usr/local/bin/fv-ssh-unlock healthcheck \
+  --socket /run/fv-ssh-unlock/control.sock
 ```
+
+Use [the daemon's one-pass mode](daemon-and-tui.md#start-with-a-one-pass-test)
+before enabling unattended recovery in a deployment whose credential mounts are
+already available. Active subnet scanning is optional; Bonjour discovery and
+registered target polling do not require it.
 
 The sequence after an outage is deliberately conservative:
 
@@ -102,7 +114,8 @@ followed by password-free SSH verification rather than another submission.
 Reconnect to the controller and open the dashboard at any time:
 
 ```bash
-fv-ssh-unlock tui
+sudo -u fv-ssh-unlock /usr/local/bin/fv-ssh-unlock tui \
+  --socket /run/fv-ssh-unlock/control.sock
 ```
 
 It is safe to leave that command displayed in `tmux`, `screen`, or `zellij`;
@@ -121,16 +134,16 @@ Use this workflow to turn “the new Mac appeared on the LAN” into a managed
 target without copying a network-supplied key into configuration blindly.
 
 On the Mac, complete the preparation steps in [Prepare a new Mac](#prepare-a-new-mac)
-and leave normal macOS booted. On the controller, start the daemon with Bonjour
-and an explicitly authorized active-scan range:
+and leave normal macOS booted. Configure the supervised daemon with Bonjour and
+an explicitly authorized active-scan range. The relevant daemon arguments are:
 
-```bash
-fv-ssh-unlock daemon \
-  --identity /var/lib/fv-ssh-unlock/id_ed25519 \
-  --discover-interval 5m \
-  --scan-cidr 192.168.1.0/24 \
-  --scan-interval 15m
+```text
+--discover-interval 5m --scan-cidr 192.168.1.0/24 --scan-interval 15m
 ```
+
+Preserve the service guide's socket and verification-identity arguments when
+adding these flags, then restart the service. Do not run a second daemon against
+the same data directory.
 
 Both discovery rounds run immediately at startup. Bonjour may first create a
 `discovered` candidate with no fingerprint. The daemon's active scan—not the
@@ -140,8 +153,12 @@ it to `identity_pending`.
 Open another terminal:
 
 ```bash
-fv-ssh-unlock tui
+sudo -u fv-ssh-unlock /usr/local/bin/fv-ssh-unlock tui \
+  --socket /run/fv-ssh-unlock/control.sock
 ```
+
+For a container deployment, run the TUI inside the controller container as
+shown in [Local operator access](containers-and-services.md#local-operator-access).
 
 Then:
 
@@ -156,8 +173,12 @@ Then:
    value in the table and the network scan alone are not acceptable trust
    sources.
 4. Confirm the alias, reserved address, port, and macOS/FileVault username.
-5. Leave automatic unlock at its default `no` for monitoring only, or select
-   `yes` and reference a secure credential provisioned before enrollment.
+5. Leave automatic unlock at its default `no` and select `runtime` for
+   monitoring plus later manual unlocks. To select `yes`, first provision a
+   secure external credential such as `systemd:<name>` or a Swarm secret, then
+   select `file` and enter that reference. The wizard never asks for or stores a
+   password. Candidate enrollment does not offer `keyring` because it cannot
+   create the required keyring entry.
 
 The daemon reconnects expecting exactly that fingerprint, pins it, saves the
 device, and begins monitoring it immediately. No restart is needed for a device
@@ -169,6 +190,38 @@ candidates persist across later scans and expiration. Persistent discovery
 never enrolls a candidate or enables automatic unlock without this operator
 workflow. See [Persistent candidate discovery](daemon-and-tui.md#persistent-candidate-discovery)
 for intervals, CIDR limits, and API alternatives.
+
+## Operate a Mac hosting service
+
+Use one controller per trusted site, rack, or network failure domain rather
+than sending FileVault credentials to a central orchestrator. Start from either
+the [native systemd deployment](containers-and-services.md#native-systemd) or
+the public `shoonimages/fv-ssh-unlock:v0.2.0-rc.1` image and its
+[container deployment requirements](containers-and-services.md).
+
+For each controller:
+
+1. Keep `devices.json`, pinned host keys, retry state, and raw credentials local
+   to that site. Use a unique FileVault credential and dedicated boot-verification
+   key for each Mac.
+2. Reconcile the non-secret inventory with `config apply` or the supplied
+   [Ansible workflow](automation.md#ansible). Deliver credential values through
+   systemd credentials, Swarm secrets, or an approved site-local secret agent;
+   never place them in inventory.
+3. Enroll each host key through a trusted out-of-band fingerprint comparison.
+   Periodic CIDR scanning may populate the candidate inbox, but it never enrolls
+   a host or enables automatic unlock.
+4. Keep the control API on its permission-restricted Unix socket. Export
+   versioned JSON state and logs to central operations without proxying that
+   administrative socket or sharing FileVault passwords.
+5. Apply bounded unlock concurrency and jitter after a site-wide restoration,
+   then let Ansible, AWX, or another orchestrator act only after the controller
+   reports `booted`.
+
+Use [Infrastructure automation](automation.md) for API and declarative-state
+integration, and [Logging and SIEM](logging-and-siem.md) for durable collection,
+retention, and alerting. The controller's stdout stream is operational telemetry,
+not a guaranteed compliance audit ledger.
 
 ## Add several known Macs
 
@@ -197,7 +250,8 @@ externally managed file and inspect the environment first:
 fv-ssh-unlock credentials providers
 ```
 
-Scoped runtime environment secrets also remain available for every device:
+Scoped runtime environment secrets remain available for explicit manual or
+one-shot unlocks. They are rejected for persistent automatic unlock:
 
 ```bash
 export FV_UNLOCK_PASSWORD_LAB_1='first-device-password'

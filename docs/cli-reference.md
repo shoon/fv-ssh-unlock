@@ -47,8 +47,8 @@ fv-ssh-unlock completion powershell --help
 fv-ssh-unlock config add [name] [flags]
 ```
 
-Either `[name]` or `--host` is required. If the alias is omitted, the host
-value is used as the device name.
+`--host` and `--user` are required. `[name]` is an optional local alias; when it
+is omitted, the host value is used as the device name.
 
 | Flag | Default | Purpose |
 | --- | --- | --- |

@@ -4,6 +4,31 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Public, multi-platform Docker Hub releases at
+  `shoonimages/fv-ssh-unlock:<version>`, with automatic semantic-tag
+  publication, anonymous-access verification, SPDX SBOM and provenance
+  attestations, keyless signing, exact workflow-identity verification, and
+  immutable `v*` registry tags.
+- A canonical logging and SIEM guide covering the JSON event contract,
+  severity and sequence semantics, alerting, bounded retention, and external
+  Fluent Bit or Vector collection.
+
+### Changed
+
+- Reorganized and audited the user documentation around known-Mac onboarding,
+  always-on Raspberry Pi/Linux operation, public container deployment,
+  hosting-service workflows, Ansible integration, and secure credential
+  delivery.
+- Hardened the Compose and Swarm examples with bounded local log rotation,
+  explicit digest inputs, and safer host-directory handling.
+- Candidate enrollment now rejects the keyring source because that workflow
+  cannot create the required keyring credential; known devices can still use
+  `config add` to provision an OS-keyring entry.
+- Corrected `config add` help to state that `--host` and `--user` are required
+  and that the positional device name is an optional local alias.
+
 ## [0.2.0-rc.1] - 2026-08-30
 
 ### Added

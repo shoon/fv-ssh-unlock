@@ -7,6 +7,12 @@ Use this page to choose the shortest guide for your task. The
 already has FileVault and Remote Login configured and you know its address and
 local user.
 
+> [!CAUTION]
+> These pages describe the **v0.2.0-rc.1 prerelease**, including the daemon,
+> TUI, candidate inbox, and secure-provider model. Stable `v0.1.0` does not
+> contain those commands. Use the version-pinned installation instructions in
+> [Getting started](getting-started.md#install-the-client).
+
 ## Choose a guide
 
 | Guide | What it covers |
@@ -16,6 +22,7 @@ local user.
 | [Persistent daemon and TUI](daemon-and-tui.md) | Always-on monitoring, safe automatic unlock, candidate enrollment, the local dashboard/API, structured logs, and power-outage recovery. |
 | [Containers and services](containers-and-services.md) | Minimal scratch image, Docker Swarm secrets, hardened Compose, systemd, and image verification. |
 | [Infrastructure automation](automation.md) | Stable JSON/API surfaces, Ansible deployment, declarative inventory, and post-boot orchestration. |
+| [Logging and SIEM](logging-and-siem.md) | Stable event fields, log levels and formats, collection, retention, and alerting. |
 | [Discovery and scanning](discovery-and-scanning.md) | Bonjour discovery, active IPv4 scanning, `.local` names, SSH banners, host-key matching, and scan safety. |
 | [Configuration and credentials](configuration-and-credentials.md) | Adding and managing devices, provider capability reports, OS-keyring storage, Docker/systemd secret files, environment secrets, interactive input, custom success text, and local files. |
 | [Status and unlocking](unlocking-and-status.md) | Host-key enrollment, status meanings, unlock results, retries, public-key boot verification, and multi-device behavior. |
@@ -30,9 +37,10 @@ local user.
 | --- | --- |
 | The Mac is already configured and you know its address and user. | Follow the [README quick start](../README.md#quick-start). |
 | You have several known lab Macs. | Use [Add several known Macs](use-cases.md#add-several-known-macs). |
-| You want an always-on Pi or Linux controller. | Follow [Persistent daemon and TUI](daemon-and-tui.md). |
-| You want a minimal container or Ansible deployment. | Follow the deployment and automation links from [Persistent daemon and TUI](daemon-and-tui.md). |
-| You want journald, Docker, or SIEM event collection. | Read [Operational logging and SIEM collection](daemon-and-tui.md#operational-logging-and-siem-collection). |
+| You want an always-on Pi or Linux controller. | Follow the [homelab power-outage workflow](use-cases.md#keep-homelab-macs-available-after-a-power-outage), then the [native systemd guide](containers-and-services.md#native-systemd). |
+| You want the public minimal container. | Pull the pinned image shown in the [project README](../README.md#always-on-controller), then follow [Containers and services](containers-and-services.md). |
+| You operate a hosted Mac fleet. | Follow [Operate a Mac hosting service](use-cases.md#operate-a-mac-hosting-service) and [Infrastructure automation](automation.md). |
+| You want journald, Docker, or SIEM event collection. | Read [Logging and SIEM](logging-and-siem.md). |
 | The target has not been prepared yet. | Start with [Prepare a new Mac](getting-started.md#prepare-a-new-mac). |
 | You do not know which booted host is the Mac. | Use [Bonjour discovery](discovery-and-scanning.md#bonjour-discovery). |
 | The Mac restarted and no longer appears in Bonjour. | Use its reserved address or follow [Active IPv4 scanning](discovery-and-scanning.md#active-ipv4-scanning). |
@@ -53,8 +61,10 @@ flowchart LR
 ```
 
 Discovery and scanning help identify candidates. Neither operation changes the
-configuration, enrolls a key, or sends a password. Trust begins only after you
-independently verify and pin the target's SSH host key with `status`.
+configuration, enrolls a key, or sends a password. For a configured target,
+trust begins only after you independently verify and pin its SSH host key with
+`status`. The daemon's candidate wizard provides a second explicit path that
+requires the operator to type the complete independently verified fingerprint.
 
 The optional daemon preserves the same boundary. It may collect discoveries
 into an untrusted candidate inbox, but it cannot enroll a key or send a

@@ -308,11 +308,14 @@ func enrollCandidateFromTUI(ctx context.Context, output io.Writer, keys <-chan b
 	if autoUnlock {
 		sourceDefault = credentials.ProviderFile
 	}
-	source, err := promptRawLineDefault(output, keys, "Credential source (file/keyring/runtime)", sourceDefault)
+	source, err := promptRawLineDefault(output, keys, "Credential source (file/runtime)", sourceDefault)
 	if err != nil {
 		return err.Error()
 	}
 	source = strings.ToLower(strings.TrimSpace(source))
+	if source == credentials.ProviderKeyring {
+		return "Candidate enrollment cannot create a keyring credential; use a pre-provisioned file reference, runtime for manual unlock, or config add for a known device."
+	}
 	var reference string
 	if source == credentials.ProviderFile {
 		reference, err = promptRawLine(output, keys, "Secure secret path or systemd:<name> reference")

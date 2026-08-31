@@ -32,38 +32,17 @@ for transition-oriented collection:
 fv-ssh-unlock daemon --log-format json --log-level info
 ```
 
-Each line contains the stable `time`, `level`, `msg`, `schema_version`,
-`component`, and per-process `run_id` envelope. Semantic records include
-`event`; applicable fields include `event_time`, `sequence`, `device`, `state`,
-`observation`, `lock_episode`, `latched`, `failure_kind`, `detail`,
-`candidate_id`, `source`, and `endpoint`. Build filters and alerts around the
-versioned `event` and state fields instead of parsing `msg`. A monitor
-`sequence` is useful for ordering within one daemon process but is not globally
-unique and resets on each run. The monitor subscription is non-blocking and
-best-effort; sequence gaps mean local telemetry was dropped so monitoring work
-could continue. Use `run_id` plus `sequence` for correlation and reconcile a
-gap against `/v1/devices`.
+The JSON daemon stream on stdout and the local API are complementary. Only
+device-monitor records have a per-run `sequence`; lifecycle, discovery, and
+candidate-action records do not. A gap can result from the bounded local
+subscription or any downstream collector, so reconcile it against
+`GET /v1/devices`. Command and final errors remain plain text on stderr and
+must survive a tolerant collector parser.
 
-The sane `info` default emits state changes, unlock actions, safety latches,
-candidate detections, and process lifecycle without one event for every normal
-poll. It also emits each device's first conclusive observation after startup as
-a per-run baseline. Use `debug` for temporary per-probe and discovery-round diagnosis;
-long-running debug collection can be noisy. `warn` and `error` intentionally
-omit ordinary healthy transitions.
-
-Collect standard output and standard error through journald, a Docker logging
-driver, or a host-level Fluent Bit/Vector agent. The daemon has no network log
-sink, so a SIEM outage cannot block its recovery loop and the scratch image
-does not need a bundled sidecar. Apply retention, transport encryption, and
-access policy in the collector. Logs exclude credentials, private-key bodies,
-authentication answers, API request bodies, and raw SSH/FileVault banners, but
-device names, endpoints, candidate hostnames, and states remain sensitive
-operational metadata.
-
-An orderly daemon shutdown drains its queued monitor events, but the stdout
-stream is not a guaranteed audit ledger. Durable or compliance retention
-requires an external journal/SIEM collector; current device state remains
-available from the local versioned API.
+Use [Logging and SIEM collection](logging-and-siem.md) as the canonical field
+and event contract. It includes the exact event/level matrix, alert examples,
+journald and Docker retention, mixed-stream `jq` filters, and external Fluent
+Bit and Vector patterns. The daemon intentionally has no network log exporter.
 
 ## Ansible
 
