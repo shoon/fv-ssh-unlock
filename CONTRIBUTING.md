@@ -106,16 +106,18 @@ published tag; issue the next patch or release-candidate version instead.
 Tags matching `v*` run two independent workflows:
 
 - The Release workflow uses GoReleaser to build archives for macOS, Linux, and
-  Windows on AMD64 and ARM64, creates checksums and archive SBOMs, and publishes
-  the GitHub release. Cosign signs the checksum file through GitHub OIDC.
+  Windows on AMD64 and ARM64 plus DEB/RPM packages for both Linux
+  architectures, creates checksums and archive/package SBOMs, and publishes the
+  GitHub release. Cosign signs the checksum file through GitHub OIDC.
 - The Container workflow verifies the minimal runtime contract, builds the
   public `shoonimages/fv-ssh-unlock:<tag>` image for `linux/amd64` and
   `linux/arm64`, attaches SPDX SBOM and maximal provenance attestations, signs
   the multi-platform digest through GitHub OIDC, verifies the exact workflow
   identity, and reports the immutable digest in the job summary.
 
-Container publication accepts only the pushed semantic-version tag and checks
-that the tag, checked-out commit, and GitHub event resolve to the same commit.
+Both workflows accept only a pushed semantic-version tag and check that the
+tag, checked-out commit, GitHub event, and a commit on `origin/main` resolve to
+the same source.
 `workflow_dispatch` is verification-only and cannot publish an arbitrary tag.
 The repository requires `DOCKERHUB_USERNAME` and a narrowly scoped
 `DOCKERHUB_TOKEN` with read/write but no delete or administrative permission.
@@ -133,4 +135,14 @@ different artifacts. Verify the native archives as documented in
 repository secrets.
 
 Dependabot checks the main Go module, mock-server Go module, and GitHub Actions
-weekly. CI also scans every build variant for reachable vulnerabilities.
+weekly. CI also scans every build variant for reachable vulnerabilities and
+builds a package snapshot. The package job installs and executes the AMD64 DEB
+and inspects both DEB/RPM architectures before a release tag is accepted.
+
+The Homebrew tap and Scoop bucket are separate public repositories so their
+automation tokens remain scoped to their own package metadata. Homebrew and
+Scoop may carry release candidates because users explicitly opt into those
+project-owned sources. Submit the first `Shoon.fv-ssh-unlock` WinGet community
+manifest only after stable `v0.2.0` exists and has passed Windows Sandbox
+installation and removal testing. Do not promote a release candidate through
+the normal WinGet identifier.
