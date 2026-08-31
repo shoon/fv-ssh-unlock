@@ -3,7 +3,9 @@
 [Documentation home](index.md) | [Discovery and scanning](discovery-and-scanning.md) | [Security](security.md)
 
 The `daemon` command is a foreground, long-running controller for an always-on
-Linux server, Raspberry Pi, Mac, or container host. It performs password-free
+Linux server, Raspberry Pi, Mac, or container host. When people say "server
+mode," they mean this persistent controller process: it serves only a local
+Unix socket, never a TCP or browser endpoint. It performs password-free
 checks, applies a conservative automatic-unlock policy, maintains a candidate
 inbox, and serves a local control API. A service manager or container runtime
 should supervise it for unattended use.
@@ -176,88 +178,25 @@ persisted cooldown.
 
 ## Operational logging and SIEM collection
 
-The daemon writes its foreground event stream to standard output. CLI parsing,
-startup, and terminal errors are written to standard error. It does not create
-or rotate log files and has no built-in network log exporter; systemd, Docker,
-or another supervisor should own retention and forwarding.
-
-`--log-format` controls the persistent event stream. `daemon --once` instead
-prints its versioned device snapshot as JSON, regardless of the logging format,
-and emits no persistent event stream.
-
-The default `--log-format text --log-level info` is appropriate for a terminal
-and records meaningful state transitions, unlock actions, latches, candidate
-detections, and lifecycle events without recording every successful poll. Use
-`debug` temporarily for per-probe and discovery-round diagnostics. `warn`
-retains failures and latch changes but omits normal recovery transitions;
-`error` retains only the highest-severity structured records and ordinary
-command errors still appear on standard error.
-
-The first conclusive observation for each device after daemon startup is also
-logged at `info`, even when it matches restored state. This gives collectors a
-fresh per-run baseline without turning routine healthy polls into log noise.
-
-For a SIEM or log pipeline, select the versioned JSON format:
+The default text format at `info` is appropriate for a terminal. Use versioned
+JSON at `info` for journald, Docker, or SIEM collection:
 
 ```bash
 fv-ssh-unlock daemon --log-format json --log-level info
 ```
 
-Each JSON record is one line. These fields provide the versioned integration
-surface:
+The daemon logger writes one JSON object per line to stdout. CLI and final
+errors remain human text on stderr, so a combined journal or Docker view can
+contain both forms and needs tolerant parsing. The first conclusive observation
+of every device is logged after each start. Routine probes and discovery-round
+records appear only at `debug`.
 
-| Field | Meaning |
-| --- | --- |
-| `time` | RFC3339 log-emission timestamp with a zone offset. |
-| `level` | `DEBUG`, `INFO`, `WARN`, or `ERROR`. |
-| `msg` | Human-readable summary; do not parse it as an event identifier. |
-| `schema_version` | Structured-log schema version, currently `1`. |
-| `component` | Producing component, currently `daemon`. |
-| `run_id` | 32-character lowercase hexadecimal identifier shared by every record from one daemon process. |
-| `event` | Stable semantic name such as `device.filevault_locked`, `device.unlock_result`, or `candidate.discovered`. |
-
-Applicable device records add `event_time`, `sequence`, `device`, `state`,
-`observation`, `lock_episode`, `auto_unlock`, `endpoint_down`, `latched`,
-`failure_kind`, and `detail`. Candidate and discovery records may add
-`candidate_id`, `candidate_state`, `source`, `observed_at`, `endpoint`,
-`hostname`, and observation counts. Route and alert on `event` and the
-structured fields; `msg` and `detail` are operator explanations and may be
-refined. A monitor `sequence` orders events from one running daemon and is not
-a globally unique event identifier. It resets for each run. A sequence gap
-means the bounded, non-blocking monitor subscription dropped local telemetry
-rather than delaying device recovery.
-
-For example, a locked-state transition resembles:
-
-```json
-{"time":"2026-08-30T18:42:15.123Z","level":"INFO","msg":"FileVault pre-boot detected","schema_version":1,"component":"daemon","run_id":"6f7f35edc08a1c425cf460ffacbe5d2a","event":"device.filevault_locked","event_time":"2026-08-30T18:42:15.120Z","sequence":42,"device":"m4alpha","state":"locked","observation":"locked","lock_episode":3,"auto_unlock":true,"endpoint_down":false,"latched":false,"detail":"FileVault pre-boot banner detected"}
-```
-
-The daemon drains queued monitor events during an orderly shutdown, but the
-subscription and stdout stream remain best-effort and are not a guaranteed
-audit log. Use the local API for current state and an external journald/SIEM
-collector with retention for durable operational or compliance records. Alert
-on sequence gaps and reconcile the affected run with a device snapshot.
-
-Common collection paths require no sidecar inside the minimal image:
-
-- systemd captures both streams in journald. Follow them with
-  `journalctl -u fv-ssh-unlock -f -o cat`, and let the host's journal gateway or
-  forwarding agent collect the unit.
-- Docker captures the container streams. Use `docker logs` for local diagnosis
-  and select the host's supported Docker logging driver for central delivery.
-- Fluent Bit and Vector can consume journald or Docker/container standard
-  output and parse each JSON line before forwarding it. Run the collector on
-  the host or as separate infrastructure; do not add it to the scratch
-  controller image.
-
-JSON logs never contain credential values, SSH private-key bodies, raw SSH or
-FileVault banners, authentication answers, environment-variable values, or
-control-API request bodies. They do contain security-relevant metadata such as
-device names, endpoints, candidate hostnames, states, and sanitized errors.
-Untrusted CR, LF, and other control characters are escaped so one event cannot
-forge another physical log record.
-Restrict log access and configure retention accordingly.
+The controller has no exporter and does not rotate files or connect to a SIEM.
+Keep collection outside the process and minimal container. The canonical
+[Logging and SIEM collection](logging-and-siem.md) guide documents the exact
+field and event contract, severity caveats, sequence-gap reconciliation,
+alerts, tolerant `jq`, journald and Docker retention, and external Fluent Bit
+and Vector examples.
 
 ## Persistent candidate discovery
 
@@ -344,8 +283,8 @@ Press `a`, select the candidate number, then follow this trust ceremony:
 5. Confirm or edit the local alias, stable host or reserved IP, SSH port, and
    macOS/FileVault username.
 6. Choose whether to enable automatic unlock; the default is `no`.
-7. Select `file`, `keyring`, or `runtime`. For `file`, enter the already
-   provisioned secure path or a portable `systemd:<name>` reference.
+7. Select `file` or `runtime`. For `file`, enter the already provisioned secure
+   path or a portable `systemd:<name>` reference.
 
 For automatic unlock, the wizard defaults to `file`, rejects `runtime`, and the
 daemon verifies that the provider is secure and available. The wizard does not
@@ -353,11 +292,17 @@ ask for, transmit, or create a FileVault password. Provision the referenced
 secret before enrollment. For password-free monitoring only, leave automatic
 unlock off; `runtime` can then remain the manual credential source.
 
+Candidate enrollment cannot create an OS-keyring entry, so it rejects
+`keyring`. To use the OS keyring, add a known device with `config add`, which
+can securely prompt for and store the credential, then use discovery only to
+confirm that the configured fingerprint is present on the network.
+
 The daemon reconnects using the exact expected fingerprint, pins that host key,
 validates and saves the device, and adds it to the running monitor. A network
 key that was not independently typed back exactly cannot pass this flow.
 
-Press `i` to permanently ignore an unwanted, unconfigured candidate. The TUI
+Press `i` to ignore an unwanted, unconfigured candidate until it is explicitly
+restored. The TUI
 refuses to ignore an already-managed or already-ignored entry and refuses to
 add an ignored or already-managed entry. The current TUI has no restore key;
 use the local API's `POST /v1/candidates/{id}/restore` route.
@@ -369,7 +314,7 @@ Interactive keys are:
 | Key | Action |
 | --- | --- |
 | `a` | Add a candidate through fingerprint verification and enrollment. |
-| `i` | Permanently ignore a selected candidate. |
+| `i` | Ignore a selected candidate until it is explicitly restored. |
 | `p` | Run an immediate policy-controlled poll and display the resulting state or error. |
 | `l` | Clear a selected device's credential or host-key failure latch. |
 | `r` | Refresh immediately. |
@@ -442,8 +387,10 @@ Enrollment accepts `application/json` with these fields:
 ```
 
 The fingerprint must exactly equal the current candidate fingerprint. The API
-does not accept a password value. Treat access to this socket as administrative
-access: a caller can poll devices, clear safety latches, change candidate state,
+does not accept a password value or create a keyring credential; candidate
+enrollment accepts `file` or `runtime` as described above. Treat access to this
+socket as administrative access: a caller can poll devices, clear safety
+latches, change candidate state,
 and enroll a verified candidate. Do not publish or proxy it onto a network.
 
 Use the purpose-built health check in service and container definitions:
@@ -493,7 +440,7 @@ behalf.
   explicitly authorized CIDRs.
 - Candidate discovery finds SSH services, not necessarily Macs or machines
   configured for FileVault SSH unlock.
-- The TUI prints the matching macOS host-public-key path for Ed25519, RSA, and
+- The TUI prints the matching macOS SSH host public-key path for Ed25519, RSA, and
   ECDSA candidates. An unrecognized key type falls back to the Ed25519 command
   and requires separate verification of the correct host-key file.
 - External changes to `devices.json`, including `config auto-unlock` and

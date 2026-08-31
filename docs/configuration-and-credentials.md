@@ -137,6 +137,8 @@ the client environment:
 
 For a multi-device unlock, configure every credential in advance. Missing
 credentials are skipped rather than prompting ambiguously for several Macs.
+Environment, prompt, and standard-input credentials are for explicit manual or
+one-shot operations; they cannot authorize persistent automatic unlock.
 
 Unsafe persistent storage is never selected automatically. If no secure
 persistent provider is detected, `config add` uses runtime input rather than
@@ -174,6 +176,12 @@ During `config add`, answer `y` when asked whether to store the password. The
 credential is stored under a stable per-device identifier, so renaming display
 details does not expose it in `devices.json`. Removing the device through a
 keyring-enabled binary removes the corresponding keyring entry.
+
+The persistent candidate wizard does not ask for or create a keyring value, so
+it offers only `file` and `runtime`. For a newly discovered device, use
+monitoring-only enrollment with `runtime`, or provision a secure external
+credential first and select `file`. Use `config add` instead when a known new
+device should store its credential in the OS keyring.
 
 The OS keyring is the recommended source on an interactive workstation. A
 headless service or SSH session may not have an unlocked desktop keyring.

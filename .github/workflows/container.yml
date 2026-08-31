@@ -5,6 +5,8 @@ name: Container
 on:
   push:
     branches: [main]
+    tags:
+      - "v*"
     paths:
       - Dockerfile
       - .dockerignore
@@ -36,17 +38,6 @@ on:
       - hack/verify-container-image.sh
       - .github/workflows/container.yml
   workflow_dispatch:
-    inputs:
-      publish:
-        description: Push the image to the private Docker Hub repository
-        type: boolean
-        required: true
-        default: false
-      tag:
-        description: Explicit prerelease tag (never latest)
-        type: string
-        required: true
-        default: edge
 
 permissions:
   contents: read
@@ -92,7 +83,7 @@ jobs:
           sbom: true
 
   publish:
-    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -102,14 +93,41 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
-      - name: Validate requested prerelease tag
+      - id: release
+        name: Bind the image version to the pushed tag
         env:
-          IMAGE_TAG: ${{ inputs.tag }}
+          IMAGE_TAG: ${{ github.ref_name }}
+          EXPECTED_REF: refs/tags/${{ github.ref_name }}
         run: |
-          if [[ "$IMAGE_TAG" == "latest" || ! "$IMAGE_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
-            echo "Refusing invalid or mutable image tag: $IMAGE_TAG" >&2
+          if [[ "$GITHUB_REF" != "$EXPECTED_REF" ]]; then
+            echo "release tag/ref mismatch: tag=$IMAGE_TAG ref=$GITHUB_REF" >&2
+            exit 1
+          fi
+          if [[ ! "$IMAGE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+            echo "release tag is not a supported semantic version: $IMAGE_TAG" >&2
+            exit 1
+          fi
+          if [[ "$(git rev-parse HEAD)" != "$GITHUB_SHA" || \
+                "$(git rev-parse "$IMAGE_TAG^{commit}")" != "$GITHUB_SHA" ]]; then
+            echo "release tag, checkout, and GitHub event do not resolve to one commit" >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "release tag does not point to a commit on origin/main" >&2
+            exit 1
+          fi
+          echo "tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+          echo "created=$(git show -s --format=%cI "$GITHUB_SHA")" >> "$GITHUB_OUTPUT"
+      - name: Require Docker Hub publisher credentials
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [[ -z "$DOCKERHUB_USERNAME" || -z "$DOCKERHUB_TOKEN" ]]; then
+            echo "DOCKERHUB_USERNAME and DOCKERHUB_TOKEN repository secrets are required" >&2
             exit 1
           fi
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -120,9 +138,9 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: shoonimages/fv-ssh-unlock
-          tags: type=raw,value=${{ inputs.tag }}
+          tags: type=raw,value=${{ steps.release.outputs.tag }}
       - id: build
-        name: Build and push signed-attestation candidate
+        name: Build and push public release image with attestations
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
@@ -131,8 +149,9 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            VERSION=${{ inputs.tag }}
+            VERSION=${{ steps.release.outputs.tag }}
             REVISION=${{ github.sha }}
+            CREATED=${{ steps.release.outputs.created }}
           provenance: mode=max
           sbom: true
       - name: Install cosign
@@ -143,3 +162,44 @@ jobs:
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: cosign sign --yes "shoonimages/fv-ssh-unlock@${DIGEST}"
+      - name: Verify the published signature and workflow identity
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          cosign verify \
+            --certificate-identity "https://github.com/${GITHUB_WORKFLOW_REF}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "shoonimages/fv-ssh-unlock@${DIGEST}"
+      - name: Verify public anonymous access and release platforms
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          anonymous_token="$(curl --fail --silent --show-error --location \
+            'https://auth.docker.io/token?service=registry.docker.io&scope=repository:shoonimages/fv-ssh-unlock:pull' | \
+            jq --exit-status --raw-output .token)"
+          curl --fail --silent --show-error --location \
+            --header "Authorization: Bearer ${anonymous_token}" \
+            --header 'Accept: application/vnd.oci.image.index.v1+json' \
+            "https://registry-1.docker.io/v2/shoonimages/fv-ssh-unlock/manifests/${DIGEST}" | \
+            jq --exit-status '
+              ([.manifests[]
+                | select(.platform.os == "linux")
+                | .platform.architecture] | sort) == ["amd64", "arm64"]
+              and
+              ([.manifests[]
+                | select(.annotations["vnd.docker.reference.type"]
+                  == "attestation-manifest")] | length) == 2
+            '
+      - name: Report immutable image digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          {
+            echo "### Published container"
+            echo
+            echo "- Tag: \`shoonimages/fv-ssh-unlock:${IMAGE_TAG}\`"
+            echo "- Digest: \`shoonimages/fv-ssh-unlock@${DIGEST}\`"
+            echo "- Platforms: \`linux/amd64\`, \`linux/arm64\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=Published container::shoonimages/fv-ssh-unlock@${DIGEST}"

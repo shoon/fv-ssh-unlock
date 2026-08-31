@@ -349,6 +349,29 @@ func TestEnrollmentRejectsNetworkFingerprintAsConfirmation(t *testing.T) {
 	}
 }
 
+func TestEnrollmentRejectsKeyringWithoutProvisioningPath(t *testing.T) {
+	engine, err := monitor.New(nil, apiProbe{}, nil,
+		&monitor.FileStore{Path: filepath.Join(privateDaemonTestDir(t), "state.json")}, monitor.DefaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	inbox := candidates.New(candidates.Options{})
+	fingerprint := "SHA256:" + base64.RawStdEncoding.EncodeToString(make([]byte, 32))
+	ingested, err := inbox.Ingest(candidates.Observation{Source: "test", Address: "192.0.2.2", Port: 22, Fingerprint: fingerprint})
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &daemonAPI{engine: engine, inbox: inbox, store: &config.Store{Path: filepath.Join(privateDaemonTestDir(t), "devices.json")}, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	body := fmt.Sprintf(`{"name":"mac","host":"192.0.2.2","user":"user","port":22,"fingerprint":%q,"credential_source":"keyring","auto_unlock":false}`, fingerprint)
+	request := httptest.NewRequest(http.MethodPost, "/v1/candidates/"+ingested.Candidate.ID+"/enroll", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	api.routes().ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "cannot create a keyring credential") {
+		t.Fatalf("keyring enroll = %d %s", response.Code, response.Body.String())
+	}
+}
+
 func TestEnrollmentPinsExpectedKeyAndAddsMonitorDevice(t *testing.T) {
 	dataDir := privateDaemonTestDir(t)
 	oldDataDir := dataDirOverride

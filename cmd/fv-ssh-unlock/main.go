@@ -66,8 +66,9 @@ Examples:
   fv-ssh-unlock daemon --once --identity ~/.ssh/id_ed25519
   fv-ssh-unlock daemon --identity ~/.ssh/id_ed25519
   fv-ssh-unlock tui`
-	addLongHelp = `Add a device to the local configuration file. Either the [name]
-argument or --host is required. If name is omitted, the host value is used.
+	addLongHelp = `Add a device to the local configuration file. --host and --user
+are required. [name] is an optional local alias; if it is omitted, the host
+value is used as the device name.
 
 For reliable remote unlock, configure a predictable address before restarting
 the Mac. Prefer a DHCP reservation (static lease). A manually assigned static
@@ -145,8 +146,8 @@ func main() {
 			if user == "" {
 				return fmt.Errorf("user is required")
 			}
-			if len(args) == 0 && host == "" {
-				return fmt.Errorf("either [name] argument or --host flag is required")
+			if host == "" {
+				return fmt.Errorf("--host flag is required")
 			}
 
 			var name string
@@ -155,10 +156,6 @@ func main() {
 			} else {
 				name = args[0]
 			}
-			if host == "" {
-				return fmt.Errorf("--host flag is required")
-			}
-
 			s, err := configStore()
 			if err != nil {
 				return err

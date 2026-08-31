@@ -228,6 +228,20 @@ filesystem, run both AMD64 and ARM64 variants, verify non-root/read-only
 operation, exercise the built-in health check, and confirm that no credential
 appears in layers, history, SBOM, provenance, or logs.
 
+A pushed semantic-version tag automatically runs the separate Container
+workflow after its validation job. The workflow binds the Docker tag to the
+Git ref and commit, publishes `shoonimages/fv-ssh-unlock:<tag>` for
+`linux/amd64` and `linux/arm64`, attaches SPDX SBOM and maximal provenance
+attestations, signs the multi-platform digest through GitHub OIDC, verifies the
+tag-specific workflow identity, and reports the digest in the Actions summary.
+Manual workflow dispatch validates the image but cannot publish it.
+
+Do not publish a release image from a workstation or move an existing registry
+tag. Ensure the Docker Hub repository is public before release and use an
+Actions token limited to registry read/write. After publication, repeat the
+anonymous pull, signature, manifest, SBOM, provenance, and hardened runtime
+checks in [Containers and persistent services](containers-and-services.md).
+
 ---
 
 [Documentation home](index.md) | [Contributing](../CONTRIBUTING.md) | [Mock-server guide](../tools/mock-fv-ssh-server/README.md)

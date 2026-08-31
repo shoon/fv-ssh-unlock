@@ -228,21 +228,21 @@ sources and environment-variable naming rules.
 The daemon's text and JSON handlers receive sanitized operational events, not
 SSH transcripts. Credential values, authentication answers, environment
 variable values, SSH private-key bodies, raw SSH/FileVault banners, and local
-API request bodies must never be logged, including at `debug` level. Tests use
+API request bodies must never be logged, including at `debug`. Tests use
 sentinel secrets and banners to enforce that boundary.
 
-Logs do include device aliases, endpoints, candidate hostnames, state
-transitions, timestamps, and sanitized error details. Untrusted carriage
-returns, line feeds, and other control characters are rendered visibly rather
-than being allowed to create or rewrite log records. That metadata can expose
-inventory and recovery activity. Restrict journal, Docker-log, and SIEM
-access; encrypt forwarding; set an appropriate retention period; and avoid
-copying complete logs into public issues.
+Logs still expose device aliases, endpoints, candidate hostnames, controller
+paths, state transitions, timestamps, and sanitized errors. Untrusted control
+characters are rendered visibly so they cannot forge a physical record.
+Restrict journal, Docker, collector, and SIEM access; encrypt forwarding; set a
+deliberate retention period; and redact records before sharing them publicly.
 
-The daemon sends no logs over the network itself. It writes standard output and
-standard error so an existing systemd journal, Docker logging driver, Fluent
-Bit, or Vector deployment can apply the site's transport and access policy.
-See [Operational logging and SIEM collection](daemon-and-tui.md#operational-logging-and-siem-collection).
+The controller sends no logs over the network. It writes structured daemon
+events to stdout and human CLI/final errors to stderr; journald, Docker, Fluent
+Bit, Vector, or the site's existing agent owns durable collection. See the
+canonical [Logging and SIEM collection](logging-and-siem.md) guide for the
+mixed-stream boundary, event schema, alerting, retention, and external
+collector setup.
 
 ## Daemon socket and persistent state
 

@@ -5,7 +5,7 @@
 # fv-ssh-unlock unless the unsafe override is explicitly supplied.
 services:
   fv-ssh-unlock:
-    image: "${FV_SSH_UNLOCK_IMAGE:?set FV_SSH_UNLOCK_IMAGE to a versioned tag or digest}"
+    image: "${FV_SSH_UNLOCK_IMAGE:?set FV_SSH_UNLOCK_IMAGE to a verified versioned tag or digest}"
     user: "65532:65532"
     read_only: true
     cap_drop:
@@ -13,6 +13,11 @@ services:
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "5"
     environment:
       FV_SSH_UNLOCK_DATA_DIR: /data
     command:
@@ -25,6 +30,8 @@ services:
       - type: bind
         source: "${FV_SSH_UNLOCK_DATA_DIR:?set FV_SSH_UNLOCK_DATA_DIR to an owned host directory}"
         target: /data
+        bind:
+          create_host_path: false
       # The source must itself be tmpfs/ramfs (for example a secret-agent
       # directory below /run), owned/readable by UID 65532, and contain only
       # the credentials this service needs.

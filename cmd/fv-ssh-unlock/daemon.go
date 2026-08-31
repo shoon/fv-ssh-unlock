@@ -1037,6 +1037,10 @@ func (a *daemonAPI) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	if request.CredentialSource == "" {
 		request.CredentialSource = credentials.ProviderRuntime
 	}
+	if request.CredentialSource == credentials.ProviderKeyring {
+		writeAPIError(w, http.StatusBadRequest, errors.New("candidate enrollment cannot create a keyring credential; use a pre-provisioned file reference, runtime for manual unlock, or config add for a known device"))
+		return
+	}
 	device := config.Device{
 		Name: request.Name, Host: request.Host, User: request.User, Port: request.Port,
 		Cred: credentials.ID(request.Name), CredentialSource: request.CredentialSource,

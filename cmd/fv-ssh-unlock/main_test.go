@@ -20,7 +20,7 @@ func TestCommandHelpDocumentsObservedPrebootBehavior(t *testing.T) {
 		phrases []string
 	}{
 		"root":       {rootLongHelp, []string{"show only Password:", "indeterminate", "without advertising Bonjour", "DHCP reservation"}},
-		"config add": {addLongHelp, []string{"DHCP reservation", "manually assigned static", ".local", "after restart", "systemd:<name>", "--allow-unsafe-credential-storage"}},
+		"config add": {addLongHelp, []string{"--host and --user", "optional local alias", "DHCP reservation", "manually assigned static", ".local", "after restart", "systemd:<name>", "--allow-unsafe-credential-storage"}},
 		"unlock":     {unlockLongHelp, []string{"explanation may be absent", "SUCCESS", "VERIFIED", "--identity", "--allow-unsafe-credential-storage"}},
 		"status":     {statusLongHelp, []string{"only Password:", "indeterminate", "ssh-agent", "standard ~/.ssh", "--identity"}},
 	}

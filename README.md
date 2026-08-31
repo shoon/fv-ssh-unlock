@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="https://github.com/shoon/fv-ssh-unlock/actions/workflows/ci.yml"><img src="https://github.com/shoon/fv-ssh-unlock/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
-  <a href="https://github.com/shoon/fv-ssh-unlock/releases/latest"><img src="https://img.shields.io/github/v/release/shoon/fv-ssh-unlock?display_name=tag&amp;sort=semver" alt="Latest release"></a>
+  <a href="https://github.com/shoon/fv-ssh-unlock/releases/tag/v0.2.0-rc.1"><img src="https://img.shields.io/badge/prerelease-v0.2.0--rc.1-orange" alt="v0.2.0-rc.1 prerelease"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/shoon/fv-ssh-unlock" alt="Apache 2.0 license"></a>
   <img src="https://img.shields.io/badge/Go-1.26.7-00ADD8?logo=go&amp;logoColor=white" alt="Go 1.26.7 or newer">
   <img src="https://img.shields.io/badge/target-macOS%2026%2B-111111" alt="Targets macOS 26 or newer">
@@ -40,10 +40,17 @@ container to recover explicitly authorized Macs after a power event.
 > This is an independent open source project. It is not affiliated with,
 > sponsored by, or endorsed by Apple Inc. See [TRADEMARKS.md](TRADEMARKS.md).
 
+> [!CAUTION]
+> The daemon, TUI, candidate inbox, secure-provider model, and service/container
+> deployment described here are the **v0.2.0-rc.1 prerelease**. The current
+> stable `v0.1.0` release does not contain those commands. Use the pinned
+> prerelease downloads and installation commands below while evaluating them.
+
 ## Contents
 
 - [What it can do](#what-it-can-do)
 - [Quick start](#quick-start)
+- [Always-on controller](#always-on-controller)
 - [Requirements](#requirements)
 - [Documentation](#documentation)
 - [Downloads and release verification](#downloads-and-release-verification)
@@ -99,6 +106,10 @@ flowchart LR
     candidates --> configure --> trust --> operate
 ```
 
+This diagram is the manual path for a target whose address is already known.
+The persistent daemon keeps newly observed SSH hosts in an untrusted candidate
+inbox until an operator completes the separate fingerprint-verification flow.
+
 ## Quick start
 
 This path assumes you already have a Mac with FileVault and Remote Login
@@ -108,15 +119,16 @@ if the target is not ready yet.
 
 ### 1. Install the client
 
-Download the archive for your client computer from
-[GitHub Releases](https://github.com/shoon/fv-ssh-unlock/releases/latest),
+Download the `v0.2.0-rc.1` archive for your client computer from the
+[prerelease page](https://github.com/shoon/fv-ssh-unlock/releases/tag/v0.2.0-rc.1),
 extract it, and place `fv-ssh-unlock` or `fv-ssh-unlock.exe` on your `PATH`.
 Release binaries include OS-keyring support.
 
 You can also build from source:
 
 ```bash
-git clone https://github.com/shoon/fv-ssh-unlock.git
+git clone --branch v0.2.0-rc.1 --depth 1 \
+  https://github.com/shoon/fv-ssh-unlock.git
 cd fv-ssh-unlock
 go build -tags keyring -o fv-ssh-unlock ./cmd/fv-ssh-unlock
 ```
@@ -196,6 +208,27 @@ VERIFIED: my-mac is booted and reachable over SSH.
 means normal macOS SSH later accepted a public key. An unlock can succeed even
 when verification is unavailable.
 
+## Always-on controller
+
+For a Raspberry Pi or Linux server, install the native binary under systemd,
+keep its state and credentials owned by a dedicated service account, and attach
+the TUI to its local Unix socket. Follow the [homelab power-outage
+workflow](docs/use-cases.md#keep-homelab-macs-available-after-a-power-outage)
+and the [native systemd deployment](docs/containers-and-services.md#native-systemd).
+
+The [public minimal container](https://hub.docker.com/r/shoonimages/fv-ssh-unlock)
+is also available as a versioned prerelease image:
+
+```bash
+docker pull shoonimages/fv-ssh-unlock:v0.2.0-rc.1
+```
+
+Do not start it with an ad hoc password bind mount. The
+[container guide](docs/containers-and-services.md) covers digest pinning,
+read-only operation, persistent non-secret state, and Swarm or memory-backed
+secret delivery. Hosted fleets should follow the
+[hosting-service workflow](docs/use-cases.md#operate-a-mac-hosting-service).
+
 ## Requirements
 
 | Component | Requirement |
@@ -226,6 +259,7 @@ Start with the guide that matches what you are trying to do:
 | [Persistent daemon and TUI](docs/daemon-and-tui.md) | You want automatic outage recovery, periodic discovery, the terminal dashboard, or structured SIEM-ready logging. |
 | [Containers and services](docs/containers-and-services.md) | You want the scratch image, Docker Swarm secrets, standalone Compose, or systemd. |
 | [Infrastructure automation](docs/automation.md) | You want stable JSON/API integration, Ansible examples, or post-boot orchestration. |
+| [Logging and SIEM](docs/logging-and-siem.md) | You want event-schema, collection, retention, or alerting guidance. |
 | [Status and unlocking](docs/unlocking-and-status.md) | You need result meanings, retry behavior, boot verification, or multi-device operation. |
 | [Security](docs/security.md) | You need the threat model, host-key workflow, privacy details, or secure-use guidance. |
 | [Troubleshooting](docs/troubleshooting.md) | A host key, connection, credential provider, discovery, DNS, or verification check failed. |

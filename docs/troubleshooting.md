@@ -238,6 +238,8 @@ unit rather than starting a competing daemon, add the flags to its existing
 `ExecStart`, restart it, and follow the journal:
 
 ```bash
+systemctl cat fv-ssh-unlock.service
+systemctl --no-pager --full status fv-ssh-unlock.service
 journalctl -u fv-ssh-unlock -f -o cat
 ```
 
@@ -247,10 +249,27 @@ For the supplied Compose deployment:
 docker compose -f deploy/docker-compose.yml logs -f fv-ssh-unlock
 ```
 
-Do not redirect a long-running daemon to an unmanaged file without retention.
-Use journald, the Docker logging driver, or a host Fluent Bit/Vector collector.
-JSON fields are documented in [Operational logging and SIEM
-collection](daemon-and-tui.md#operational-logging-and-siem-collection).
+The daemon logger's stdout is one-record-per-line JSON when enabled, but CLI
+and final errors on stderr remain human text. A combined journal or Docker view
+can therefore contain both forms. Preserve non-JSON lines while inspecting a
+bounded journal window:
+
+```bash
+journalctl -u fv-ssh-unlock --since '-30 minutes' -o cat \
+  | jq -Rrc 'fromjson? // {unparsed: .}'
+```
+
+If parsing fails, confirm the effective service command contains
+`--log-format json` and that the collector parses journald's `MESSAGE` or the
+Docker message field rather than its outer envelope. If events are missing but
+the API is healthy, inspect local retention and collector backpressure, check
+`(run_id, sequence)` continuity for monitor records, and reconcile current
+state through `/v1/devices`.
+
+Do not redirect a long-running daemon to an unmanaged file. The canonical
+[Logging and SIEM collection](logging-and-siem.md) guide covers fields, event
+levels, tolerant parsing, alerts, retention, journald, Docker, Fluent Bit, and
+Vector without adding an exporter to the controller.
 
 Logs deliberately omit credential values, authentication answers, private-key
 bodies, API request bodies, and raw SSH/FileVault banners. They still contain
