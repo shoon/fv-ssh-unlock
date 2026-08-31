@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.2.0-rc.1] - 2026-08-30
+
 ### Added
 
 - Foreground `daemon` with explicit per-device automatic unlock, bounded
