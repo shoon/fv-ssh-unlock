@@ -14,8 +14,8 @@ import (
 )
 
 const (
-	tmpfsMagic = 0x01021994
-	ramfsMagic = 0x858458f6
+	tmpfsMagic int64 = 0x01021994
+	ramfsMagic int64 = 0x858458f6
 )
 
 func platformSecureCredentialFile(path string, _ os.FileInfo) (bool, string) {
@@ -29,11 +29,18 @@ func platformSecureCredentialFile(path string, _ os.FileInfo) (bool, string) {
 }
 
 func platformSecureCredentialDirectory(path string) (bool, string) {
-	info, err := os.Stat(path)
-	if err != nil || !info.IsDir() || !memoryBackedFilesystem(path) {
+	clean := filepath.Clean(path)
+	if !filepath.IsAbs(clean) {
 		return false, ""
 	}
-	return true, filepath.Clean(path) + " is a memory-backed credential directory"
+	// #nosec G703 -- this function intentionally inspects the exact absolute
+	// credential directory selected by the service manager or built-in path.
+	// Lstat plus the checks below reject symbolic links and non-directories.
+	info, err := os.Lstat(clean)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !memoryBackedFilesystem(clean) {
+		return false, ""
+	}
+	return true, clean + " is a memory-backed credential directory"
 }
 
 func memoryBackedFilesystem(path string) bool {
@@ -41,5 +48,5 @@ func memoryBackedFilesystem(path string) bool {
 	if err := unix.Statfs(path, &stat); err != nil {
 		return false
 	}
-	return uint64(stat.Type) == tmpfsMagic || uint64(stat.Type) == ramfsMagic
+	return stat.Type == tmpfsMagic || stat.Type == ramfsMagic
 }

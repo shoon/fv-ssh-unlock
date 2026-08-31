@@ -13,6 +13,19 @@ import (
 	"testing"
 )
 
+func TestPlatformSecureCredentialDirectoryRejectsRelativeAndSymlinkPaths(t *testing.T) {
+	if secure, _ := platformSecureCredentialDirectory("relative"); secure {
+		t.Fatal("relative credential directory was accepted")
+	}
+	link := filepath.Join(t.TempDir(), "memory-link")
+	if err := os.Symlink("/dev/shm", link); err != nil {
+		t.Fatal(err)
+	}
+	if secure, _ := platformSecureCredentialDirectory(link); secure {
+		t.Fatal("symbolic-link credential directory was accepted")
+	}
+}
+
 func TestFileProviderAcceptsMemoryBackedSystemdCredentialDirectory(t *testing.T) {
 	const memoryRoot = "/dev/shm"
 	if secure, _ := platformSecureCredentialDirectory(memoryRoot); !secure {
