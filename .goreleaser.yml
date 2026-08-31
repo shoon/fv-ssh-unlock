@@ -44,6 +44,7 @@ archives:
       - SECURITY.md
       - CONTRIBUTING.md
       - README.md
+      - CHANGELOG.md
       - docs/*.md
       - deploy/**/*
       - contrib/ansible/**/*
