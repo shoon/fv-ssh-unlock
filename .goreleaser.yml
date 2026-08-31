@@ -53,11 +53,40 @@ archives:
       - tools/mock-fv-ssh-server/Tahoe 26.0 FileVault SSH Real Output.txt
       - assets/fv-ssh-unlock.png
 
+nfpms:
+  - id: linux-packages
+    ids:
+      - fv-ssh-unlock
+    package_name: fv-ssh-unlock
+    vendor: fv-ssh-unlock contributors
+    homepage: https://github.com/shoon/fv-ssh-unlock
+    maintainer: Shaun Murphy <shaun-github@ncdents.com>
+    description: Securely monitor and unlock FileVault-protected Macs over SSH
+    license: Apache-2.0
+    section: utils
+    priority: optional
+    bindir: /usr/bin
+    formats:
+      - deb
+      - rpm
+    contents:
+      - src: LICENSE
+        dst: /usr/share/doc/fv-ssh-unlock/LICENSE
+      - src: NOTICE
+        dst: /usr/share/doc/fv-ssh-unlock/NOTICE
+      - src: THIRD_PARTY_NOTICES.txt
+        dst: /usr/share/doc/fv-ssh-unlock/THIRD_PARTY_NOTICES.txt
+      - src: TRADEMARKS.md
+        dst: /usr/share/doc/fv-ssh-unlock/TRADEMARKS.md
+
 checksum:
   name_template: "checksums.txt"
 
 sboms:
-  - artifacts: archive
+  - id: archive-sboms
+    artifacts: archive
+  - id: package-sboms
+    artifacts: package
 
 signs:
   - cmd: cosign

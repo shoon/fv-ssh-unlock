@@ -219,8 +219,15 @@ test matrix, and release process. Report suspected vulnerabilities privately
 as described in [SECURITY.md](../SECURITY.md).
 
 Releases are built by GitHub Actions for macOS, Linux, and Windows on AMD64 and
-ARM64. The workflow publishes checksums, keyless Sigstore verification
-material, and SPDX SBOMs with each archive.
+ARM64. The workflow publishes archives plus DEB and RPM packages for both Linux
+architectures, checksums, keyless Sigstore verification material, and SPDX
+SBOMs for every archive and native package.
+
+Both release workflows require a supported semantic-version tag and verify
+that the tag, checkout, GitHub event, and a commit on `origin/main` all identify
+the same source. Package snapshots are built on ordinary pull requests; the
+AMD64 DEB is installed and executed, and both DEB/RPM architectures have their
+metadata and contents inspected before a release tag can use the configuration.
 
 The production container is built separately as a statically linked Linux
 binary in a `scratch` final stage. Container validation must inspect the final
@@ -241,6 +248,16 @@ tag. Ensure the Docker Hub repository is public before release and use an
 Actions token limited to registry read/write. After publication, repeat the
 anonymous pull, signature, manifest, SBOM, provenance, and hardened runtime
 checks in [Containers and persistent services](containers-and-services.md).
+
+The project-owned [`shoon/homebrew-tap`](https://github.com/shoon/homebrew-tap)
+uses Homebrew's generated `brew test-bot`, bottle publication, and formula bump
+workflows. The project-owned
+[`shoon/scoop-bucket`](https://github.com/shoon/scoop-bucket) validates both
+Windows release archives and checks for newer stable releases. Package-manager
+manifests always point to immutable upstream release assets; they do not rebuild
+or replace the GitHub release binaries. See
+[Package-manager installation](package-managers.md) for the user-facing status
+and stable-only WinGet policy.
 
 ---
 

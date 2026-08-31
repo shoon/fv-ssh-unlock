@@ -196,7 +196,7 @@ for intervals, CIDR limits, and API alternatives.
 Use one controller per trusted site, rack, or network failure domain rather
 than sending FileVault credentials to a central orchestrator. Start from either
 the [native systemd deployment](containers-and-services.md#native-systemd) or
-the public `shoonimages/fv-ssh-unlock:v0.2.0-rc.1` image and its
+the public `shoonimages/fv-ssh-unlock:v0.2.0-rc.2` image and its
 [container deployment requirements](containers-and-services.md).
 
 For each controller:

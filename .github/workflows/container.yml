@@ -166,10 +166,20 @@ jobs:
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          cosign verify \
-            --certificate-identity "https://github.com/${GITHUB_WORKFLOW_REF}" \
-            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            "shoonimages/fv-ssh-unlock@${DIGEST}"
+          for attempt in {1..12}; do
+            if cosign verify \
+              --certificate-identity "https://github.com/${GITHUB_WORKFLOW_REF}" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              "shoonimages/fv-ssh-unlock@${DIGEST}"; then
+              exit 0
+            fi
+            if [[ "$attempt" -eq 12 ]]; then
+              echo "signature was not discoverable after ${attempt} attempts" >&2
+              exit 1
+            fi
+            echo "signature is not discoverable yet; retrying in 5 seconds" >&2
+            sleep 5
+          done
       - name: Verify public anonymous access and release platforms
         env:
           DIGEST: ${{ steps.build.outputs.digest }}

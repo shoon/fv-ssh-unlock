@@ -8,7 +8,7 @@ already has FileVault and Remote Login configured and you know its address and
 local user.
 
 > [!CAUTION]
-> These pages describe the **v0.2.0-rc.1 prerelease**, including the daemon,
+> These pages describe the **v0.2.0-rc.2 prerelease**, including the daemon,
 > TUI, candidate inbox, and secure-provider model. Stable `v0.1.0` does not
 > contain those commands. Use the version-pinned installation instructions in
 > [Getting started](getting-started.md#install-the-client).
@@ -18,6 +18,7 @@ local user.
 | Guide | What it covers |
 | --- | --- |
 | [Getting started](getting-started.md) | Requirements, client installation, release verification, preparing a target Mac, choosing an unlock user, stable addressing, and removal. |
+| [Package-manager installation](package-managers.md) | Homebrew, Scoop, DEB/RPM release assets, WinGet status, upgrades, removal, and package integrity. |
 | [Use cases](use-cases.md) | Task-based paths for known Macs, new targets, discovery, one-device unlocks, and fleet operation. |
 | [Persistent daemon and TUI](daemon-and-tui.md) | Always-on monitoring, safe automatic unlock, candidate enrollment, the local dashboard/API, structured logs, and power-outage recovery. |
 | [Containers and services](containers-and-services.md) | Minimal scratch image, Docker Swarm secrets, hardened Compose, systemd, and image verification. |
