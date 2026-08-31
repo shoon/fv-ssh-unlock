@@ -151,10 +151,11 @@ jobs:
       - name: Test keyring backend (Linux)
         if: runner.os == 'Linux'
         run: |
-          dbus-run-session -- bash -c '
-            printf "" | gnome-keyring-daemon --unlock --components=secrets
-            go test -tags keyring ./...
-          '
+          mkdir -p "${HOME}/.local/share/keyrings"
+          chmod 700 "${HOME}/.local" "${HOME}/.local/share" "${HOME}/.local/share/keyrings"
+          printf '%s\n' 'synthetic-test-only' | gnome-keyring-daemon --unlock --components=secrets
+          go test -tags keyring ./...
+        shell: dbus-run-session -- bash --noprofile --norc -eo pipefail {0}
       - name: Test keyring backend
         if: runner.os != 'Linux'
         run: go test -tags keyring ./...
