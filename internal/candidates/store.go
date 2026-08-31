@@ -13,8 +13,6 @@ import (
 	"io"
 	"net/netip"
 	"os"
-	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 
@@ -50,14 +48,14 @@ func (b *Inbox) saveLocked() error {
 }
 
 func loadState(path string) (*diskState, error) {
-	file, err := openStableFile(path)
+	file, err := securefs.OpenStable(path, "candidate inbox")
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	info, err := file.Stat()
 	if err != nil {
 		return nil, err
@@ -65,8 +63,8 @@ func loadState(path string) (*diskState, error) {
 	if info.Size() > maxStoreSize {
 		return nil, fmt.Errorf("candidate inbox exceeds %d bytes", maxStoreSize)
 	}
-	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("candidate inbox permissions are too open: %s", info.Mode().Perm())
+	if err := securefs.VerifyPrivatePermissions(info); err != nil {
+		return nil, fmt.Errorf("insecure candidate inbox %s: %w", path, err)
 	}
 	data, err := io.ReadAll(io.LimitReader(file, maxStoreSize+1))
 	if err != nil {
@@ -99,67 +97,7 @@ func saveState(path string, state diskState) error {
 	if len(data) > maxStoreSize {
 		return fmt.Errorf("candidate inbox exceeds %d bytes", maxStoreSize)
 	}
-	dir := filepath.Dir(path)
-	if err := securefs.EnsurePrivateDirectory(dir, "candidate inbox"); err != nil {
-		return err
-	}
-	if info, err := os.Lstat(path); err == nil {
-		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("candidate inbox is not a regular file: %s", path)
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-
-	temporary, err := os.CreateTemp(dir, ".candidates-*.tmp")
-	if err != nil {
-		return err
-	}
-	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
-	failed := func(err error) error {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Chmod(0o600); err != nil {
-		return failed(err)
-	}
-	if _, err := temporary.Write(data); err != nil {
-		return failed(err)
-	}
-	if err := temporary.Sync(); err != nil {
-		return failed(err)
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	if err := replaceFile(temporaryPath, path); err != nil {
-		return err
-	}
-	return os.Chmod(path, 0o600)
-}
-
-func openStableFile(path string) (*os.File, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	fail := func(err error) (*os.File, error) {
-		_ = file.Close()
-		return nil, err
-	}
-	opened, err := file.Stat()
-	if err != nil {
-		return fail(err)
-	}
-	linked, err := os.Lstat(path)
-	if err != nil {
-		return fail(err)
-	}
-	if !opened.Mode().IsRegular() || !linked.Mode().IsRegular() || linked.Mode()&os.ModeSymlink != 0 || !os.SameFile(opened, linked) {
-		return fail(fmt.Errorf("candidate inbox is not a stable regular file: %s", path))
-	}
-	return file, nil
+	return securefs.WritePrivate(path, "candidate inbox", ".candidates-*.tmp", data)
 }
 
 func validateCandidate(candidate Candidate) error {

@@ -25,7 +25,7 @@ const (
 	StateUnreachable      State = "unreachable"
 	StateUnlocking        State = "unlocking"
 	StateBooting          State = "booting"
-	StateCredentialFailed State = "credential-failed"
+	StateCredentialFailed State = "credential-failed" // #nosec G101 -- state label, not a credential
 	StateError            State = "error"
 )
 

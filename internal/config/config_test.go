@@ -7,6 +7,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -134,7 +135,7 @@ func TestLoadRejectsOversizedConfiguration(t *testing.T) {
 	if err := f.Truncate(maxConfigSize + 1); err != nil {
 		t.Fatal(err)
 	}
-	f.Close()
+	_ = f.Close()
 	if _, err := (&Store{Path: path}).Load(); err == nil {
 		t.Fatalf("expected oversized configuration to be rejected")
 	}
@@ -331,5 +332,59 @@ func TestLoadRejectsSymlink(t *testing.T) {
 	}
 	if _, err := (&Store{Path: link}).Load(); err == nil {
 		t.Fatal("expected symlinked configuration to be rejected")
+	}
+}
+
+const (
+	helperPathEnv = "FV_SSH_UNLOCK_TEST_CONFIG_PATH"
+	helperNameEnv = "FV_SSH_UNLOCK_TEST_DEVICE_NAME"
+	helperWriters = 6
+)
+
+// TestConcurrentProcessesDoNotLoseDevices exercises the cross-process lock: the
+// daemon and the CLI run in separate processes, so an in-process mutex alone
+// would let one load-modify-save cycle overwrite the other's device.
+func TestConcurrentProcessesDoNotLoseDevices(t *testing.T) {
+	path := filepath.Join(privateConfigTestDir(t), "devices.json")
+	var wg sync.WaitGroup
+	errs := make(chan error, helperWriters)
+	for index := range helperWriters {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			name := fmt.Sprintf("proc-%02d", index)
+			command := exec.Command(os.Args[0], "-test.run=TestConfigAddHelperProcess", "-test.v")
+			command.Env = append(os.Environ(), helperPathEnv+"="+path, helperNameEnv+"="+name)
+			if output, err := command.CombinedOutput(); err != nil {
+				errs <- fmt.Errorf("%s: %w: %s", name, err, output)
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	devices, err := (&Store{Path: path}).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(devices) != helperWriters {
+		t.Fatalf("concurrent processes retained %d devices, want %d: %+v", len(devices), helperWriters, devices)
+	}
+}
+
+// TestConfigAddHelperProcess is the child half of
+// TestConcurrentProcessesDoNotLoseDevices and is inert in a normal test run.
+func TestConfigAddHelperProcess(t *testing.T) {
+	path := os.Getenv(helperPathEnv)
+	name := os.Getenv(helperNameEnv)
+	if path == "" || name == "" {
+		t.Skip("helper process is driven by TestConcurrentProcessesDoNotLoseDevices")
+	}
+	store := &Store{Path: path}
+	device := Device{Name: name, Host: "192.0.2.1", User: "user", Port: 22, Cred: credentials.ID(name)}
+	if err := store.Add(device); err != nil {
+		t.Fatalf("helper add %s: %v", name, err)
 	}
 }

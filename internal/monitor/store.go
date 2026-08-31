@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 
 	"github.com/shoon/fv-ssh-unlock/internal/securefs"
 )
@@ -26,27 +25,24 @@ func (s *FileStore) Load() (PersistentState, error) {
 	if s == nil || s.Path == "" {
 		return PersistentState{}, errorsNewPath()
 	}
-	info, err := os.Lstat(s.Path)
+	fh, err := securefs.OpenStable(s.Path, "monitor state")
 	if err != nil {
 		if os.IsNotExist(err) {
 			return PersistentState{Version: persistentStateVersion, Devices: map[string]DeviceRecord{}}, nil
 		}
 		return PersistentState{}, err
 	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-		return PersistentState{}, fmt.Errorf("monitor state is not a regular file: %s", s.Path)
+	defer func() { _ = fh.Close() }()
+	info, err := fh.Stat()
+	if err != nil {
+		return PersistentState{}, err
 	}
-	if err := validatePrivateFile(info); err != nil {
+	if err := securefs.VerifyPrivatePermissions(info); err != nil {
 		return PersistentState{}, fmt.Errorf("insecure monitor state file %s: %w", s.Path, err)
 	}
 	if info.Size() > maxStateSize {
 		return PersistentState{}, fmt.Errorf("monitor state exceeds %d bytes", maxStateSize)
 	}
-	fh, err := os.Open(s.Path)
-	if err != nil {
-		return PersistentState{}, err
-	}
-	defer fh.Close()
 	content, err := io.ReadAll(io.LimitReader(fh, maxStateSize+1))
 	if err != nil {
 		return PersistentState{}, err
@@ -91,43 +87,7 @@ func (s *FileStore) Save(state PersistentState) error {
 		return fmt.Errorf("monitor state exceeds %d bytes", maxStateSize)
 	}
 
-	dir := filepath.Dir(s.Path)
-	if err := securefs.EnsurePrivateDirectory(dir, "monitor state"); err != nil {
-		return err
-	}
-	if info, err := os.Lstat(s.Path); err == nil {
-		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("monitor state is not a regular file: %s", s.Path)
-		}
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-
-	tmp, err := os.CreateTemp(dir, ".monitor-state-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(content); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := replaceStateFile(tmpName, s.Path); err != nil {
-		return err
-	}
-	return os.Chmod(s.Path, 0o600)
+	return securefs.WritePrivate(s.Path, "monitor state", ".monitor-state-*.tmp", content)
 }
 
 func errorsNewPath() error { return fmt.Errorf("monitor state path is required") }

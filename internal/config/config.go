@@ -12,7 +12,6 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"unicode"
@@ -37,32 +36,58 @@ type Device struct {
 	AutoUnlock       bool   `json:"auto_unlock,omitempty"`
 }
 
-// Store manages a JSON file of devices.
+// Store manages a JSON file of devices. The in-process mutex orders goroutines
+// inside one process; an advisory lock on a sidecar file orders the daemon
+// against a separate CLI process, so a load-modify-save cycle cannot silently
+// lose a device written by the other one.
 type Store struct {
 	Path string
 	mu   sync.Mutex
 }
 
+// lockPath is the sidecar whose advisory lock guards the store. It is a
+// separate file so the lock survives the atomic rename that replaces the store.
+func (s *Store) lockPath() string { return s.Path + ".lock" }
+
+// mutate serializes a read-modify-write of the store against every other
+// process, re-reading the file under the lock so a concurrent writer's device
+// is never overwritten from a stale in-memory copy.
+func (s *Store) mutate(apply func([]Device) ([]Device, error)) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	lock, err := securefs.AcquireLock(s.lockPath(), "configuration")
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
+	devs, err := s.Load()
+	if err != nil {
+		return err
+	}
+	next, err := apply(devs)
+	if err != nil {
+		return err
+	}
+	return s.save(next)
+}
+
 // Load returns the list of devices from the store file.
 func (s *Store) Load() ([]Device, error) {
-	info, err := os.Lstat(s.Path)
+	fh, err := securefs.OpenStable(s.Path, "configuration")
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
 		return nil, err
 	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-		return nil, fmt.Errorf("configuration is not a regular file: %s", s.Path)
+	defer func() { _ = fh.Close() }()
+	info, err := fh.Stat()
+	if err != nil {
+		return nil, err
 	}
 	if info.Size() > maxConfigSize {
 		return nil, fmt.Errorf("configuration exceeds %d bytes", maxConfigSize)
 	}
-	fh, err := os.Open(s.Path)
-	if err != nil {
-		return nil, err
-	}
-	defer fh.Close()
 	f, err := io.ReadAll(io.LimitReader(fh, maxConfigSize+1))
 	if err != nil {
 		return nil, err
@@ -85,10 +110,17 @@ func (s *Store) Load() ([]Device, error) {
 	return devs, nil
 }
 
-// Save writes the devices to the store file.
+// Save replaces the devices in the store file. The caller-supplied inventory is
+// authoritative, but the cross-process lock is still held so the replacement
+// cannot interleave with another process's read-modify-write cycle.
 func (s *Store) Save(devs []Device) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	lock, err := securefs.AcquireLock(s.lockPath(), "configuration")
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
 	return s.save(devs)
 }
 
@@ -96,6 +128,7 @@ func (s *Store) save(devs []Device) error {
 	if err := validateDevices(devs); err != nil {
 		return err
 	}
+	// #nosec G117 -- Device.Cred is a credential provider reference (a keyring entry or file path), never secret material; secrets live only in the OS keyring, credential file, or TPM.
 	b, err := json.MarshalIndent(devs, "", "  ")
 	if err != nil {
 		return err
@@ -103,104 +136,55 @@ func (s *Store) save(devs []Device) error {
 	if len(b) > maxConfigSize {
 		return fmt.Errorf("configuration exceeds %d bytes", maxConfigSize)
 	}
-	dir := filepath.Dir(s.Path)
-	if err := securefs.EnsurePrivateDirectory(dir, "configuration"); err != nil {
-		return err
-	}
-	if info, err := os.Lstat(s.Path); err == nil {
-		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("configuration is not a regular file: %s", s.Path)
-		}
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-
-	tmp, err := os.CreateTemp(dir, ".devices-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(b); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := replaceFile(tmpName, s.Path); err != nil {
-		return err
-	}
-	return os.Chmod(s.Path, 0o600)
+	return securefs.WritePrivate(s.Path, "configuration", ".devices-*.tmp", b)
 }
 
 // Add adds a device to the store.
 func (s *Store) Add(d Device) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	devs, err := s.Load()
-	if err != nil {
-		return err
-	}
-	// prevent duplicate device names
-	for _, ex := range devs {
-		if ex.Name == d.Name {
-			return fmt.Errorf("device already exists: %s", d.Name)
+	return s.mutate(func(devs []Device) ([]Device, error) {
+		// prevent duplicate device names
+		for _, ex := range devs {
+			if ex.Name == d.Name {
+				return nil, fmt.Errorf("device already exists: %s", d.Name)
+			}
 		}
-	}
-	devs = append(devs, d)
-	return s.save(devs)
+		return append(devs, d), nil
+	})
 }
 
 // Update replaces an existing device with the same name.
 func (s *Store) Update(d Device) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if err := ValidateDevice(d); err != nil {
 		return err
 	}
-	devs, err := s.Load()
-	if err != nil {
-		return err
-	}
-	for i := range devs {
-		if devs[i].Name == d.Name {
-			devs[i] = d
-			return s.save(devs)
+	return s.mutate(func(devs []Device) ([]Device, error) {
+		for i := range devs {
+			if devs[i].Name == d.Name {
+				devs[i] = d
+				return devs, nil
+			}
 		}
-	}
-	return fmt.Errorf("device not found: %s", d.Name)
+		return nil, fmt.Errorf("device not found: %s", d.Name)
+	})
 }
 
 // Remove deletes a device by name.
 func (s *Store) Remove(name string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	devs, err := s.Load()
-	if err != nil {
-		return err
-	}
-	out := make([]Device, 0, len(devs))
-	found := false
-	for _, d := range devs {
-		if d.Name == name {
-			found = true
-			continue
+	return s.mutate(func(devs []Device) ([]Device, error) {
+		out := make([]Device, 0, len(devs))
+		found := false
+		for _, d := range devs {
+			if d.Name == name {
+				found = true
+				continue
+			}
+			out = append(out, d)
 		}
-		out = append(out, d)
-	}
-	if !found {
-		return fmt.Errorf("device not found: %s", name)
-	}
-	return s.save(out)
+		if !found {
+			return nil, fmt.Errorf("device not found: %s", name)
+		}
+		return out, nil
+	})
 }
 
 // ValidateDevice rejects values that could redirect a credential to an

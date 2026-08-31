@@ -4,11 +4,12 @@
 //
 // Copyright 2025-2026 Shaun Murphy
 
-package candidates
+package securefs
 
 import "golang.org/x/sys/windows"
 
-func replaceFile(oldPath, newPath string) error {
+// ReplaceFile renames oldPath over newPath, writing through to disk.
+func ReplaceFile(oldPath, newPath string) error {
 	oldPointer, err := windows.UTF16PtrFromString(oldPath)
 	if err != nil {
 		return err

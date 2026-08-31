@@ -1,0 +1,118 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// Copyright 2025-2026 Shaun Murphy
+
+package securefs
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+)
+
+// FileMode is the mode of every private file this package creates or repairs.
+const FileMode = 0o600
+
+// VerifyPrivatePermissions rejects a file that group or other users can reach.
+// Windows security is carried by the inherited ACL rather than POSIX mode bits,
+// which os.Stat reports as 0666, so the check is a no-op there.
+func VerifyPrivatePermissions(info os.FileInfo) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("permissions are %04o; expected no group or other access", info.Mode().Perm())
+	}
+	return nil
+}
+
+// OpenStable opens path read-only and validates the opened descriptor against
+// the path rather than trusting an Lstat taken before the open. A local symlink
+// swap therefore cannot redirect the read to another file. purpose names the
+// store in error messages.
+func OpenStable(path, purpose string) (*os.File, error) {
+	return openChecked(path, purpose, os.O_RDONLY, false)
+}
+
+// OpenPrivate opens path with flags, creating it with mode 0600 when os.O_CREATE
+// is present, applies the same stable-descriptor validation as OpenStable, and
+// re-applies mode 0600 to the opened descriptor.
+func OpenPrivate(path, purpose string, flags int) (*os.File, error) {
+	return openChecked(path, purpose, flags, true)
+}
+
+func openChecked(path, purpose string, flags int, repairMode bool) (*os.File, error) {
+	// #nosec G304 -- opening caller-controlled paths safely is this helper's purpose; the descriptor is validated against Lstat/SameFile below before use.
+	file, err := os.OpenFile(path, flags, FileMode)
+	if err != nil {
+		return nil, err
+	}
+	fail := func(err error) (*os.File, error) {
+		_ = file.Close()
+		return nil, err
+	}
+	opened, err := file.Stat()
+	if err != nil {
+		return fail(err)
+	}
+	linked, err := os.Lstat(path)
+	if err != nil {
+		return fail(err)
+	}
+	if !opened.Mode().IsRegular() || !linked.Mode().IsRegular() || linked.Mode()&os.ModeSymlink != 0 || !os.SameFile(opened, linked) {
+		return fail(fmt.Errorf("%s is not a stable regular file: %s", purpose, path))
+	}
+	if repairMode {
+		if err := file.Chmod(FileMode); err != nil {
+			return fail(err)
+		}
+	}
+	return file, nil
+}
+
+// WritePrivate atomically replaces path with data. The content is written to a
+// private temporary file created from pattern in the same directory, flushed to
+// stable storage, and renamed over path, so no reader observes a partial or
+// group-readable file. purpose names the store in error messages.
+func WritePrivate(path, purpose, pattern string, data []byte) error {
+	dir := filepath.Dir(path)
+	if err := EnsurePrivateDirectory(dir, purpose); err != nil {
+		return err
+	}
+	if info, err := os.Lstat(path); err == nil {
+		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%s is not a regular file: %s", purpose, path)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
+	temporary, err := os.CreateTemp(dir, pattern)
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer func() { _ = os.Remove(temporaryPath) }()
+	failed := func(err error) error {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Chmod(FileMode); err != nil {
+		return failed(err)
+	}
+	if _, err := temporary.Write(data); err != nil {
+		return failed(err)
+	}
+	if err := temporary.Sync(); err != nil {
+		return failed(err)
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := ReplaceFile(temporaryPath, path); err != nil {
+		return err
+	}
+	return os.Chmod(path, FileMode)
+}

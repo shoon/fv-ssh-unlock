@@ -306,7 +306,12 @@ func (e *Engine) applyProbe(managed *managedDevice, result ProbeResult, probeErr
 	} else {
 		observationProduced = true
 		record.LastObservation = result.State
-		record.ConsecutiveFailures = 0
+		// An error-free unreachable observation is still a failed contact, so
+		// it must escalate the backoff instead of resetting the counter the
+		// arm below would immediately set back to one.
+		if result.State != StateUnreachable {
+			record.ConsecutiveFailures = 0
+		}
 		switch result.State {
 		case StateBooted:
 			record.State = StateBooted
@@ -414,7 +419,11 @@ func (e *Engine) markUnlockStarted(managed *managedDevice) (bool, error) {
 	if err := e.persistLocked(); err != nil {
 		// Never release a credential if the attempt marker was not durable.
 		record.State = StateError
+		record.StateChangedAt = now
 		record.LastError = boundedText(fmt.Sprintf("persist unlock attempt: %v", err))
+		// Emit the transition like every other one: a SIEM or TUI consumer must
+		// not miss a device dropping into the error state.
+		e.emitLocked(EventStateChanged, managed.device.Name, stateEventMessage(record))
 		return false, fmt.Errorf("persist unlock attempt: %w", err)
 	}
 	e.emitLocked(EventUnlockStarted, managed.device.Name, "automatic unlock authorized after definitive FileVault detection")
@@ -519,7 +528,7 @@ func (e *Engine) ClearLatch(name string) error {
 	defer managed.opMu.Unlock()
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if !managed.record.Latched && !(managed.record.LockEpisodeOpen && managed.record.UnlockAttempted) {
+	if !managed.record.Latched && (!managed.record.LockEpisodeOpen || !managed.record.UnlockAttempted) {
 		return nil
 	}
 	previous := managed.record

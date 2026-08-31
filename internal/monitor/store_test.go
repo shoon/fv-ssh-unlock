@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -119,5 +120,34 @@ func TestSnapshotJSONOmitsZeroTimestamps(t *testing.T) {
 	}
 	if bytes.Contains(payload, []byte("0001-01-01")) || bytes.Contains(payload, []byte("last_checked_at")) {
 		t.Fatalf("zero timestamps leaked into operator JSON: %s", payload)
+	}
+}
+
+// The stable-open idiom must be exercised through the opened descriptor rather
+// than an Lstat taken before the open, so a swap between the check and the read
+// cannot redirect Load to another file.
+func TestFileStoreLoadValidatesOpenedDescriptor(t *testing.T) {
+	dir := t.TempDir()
+	directoryPath := filepath.Join(dir, "state-dir.json")
+	if err := os.Mkdir(directoryPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&FileStore{Path: directoryPath}).Load(); err == nil {
+		t.Fatal("Load accepted a directory")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks requires additional privileges on Windows")
+	}
+	target := filepath.Join(dir, "target.json")
+	if err := os.WriteFile(target, []byte(`{"version":1,"devices":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "state.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	_, err := (&FileStore{Path: link}).Load()
+	if err == nil || !strings.Contains(err.Error(), "stable regular file") {
+		t.Fatalf("Load accepted a symlink: %v", err)
 	}
 }

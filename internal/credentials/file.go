@@ -29,7 +29,7 @@ func (*fileProvider) Name() string { return ProviderFile }
 func (p *fileProvider) Get(reference string) (string, error) {
 	path, err := resolveCredentialFileReference(reference)
 	if err != nil {
-		return "", fmt.Errorf("credential file unavailable: %s", err)
+		return "", fmt.Errorf("credential file unavailable: %w", err)
 	}
 	assessment := assessCredentialPath(path)
 	if !assessment.Available {
@@ -44,7 +44,7 @@ func (p *fileProvider) Get(reference string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	data, err := io.ReadAll(io.LimitReader(f, maxCredentialFileSize+1))
 	if err != nil {

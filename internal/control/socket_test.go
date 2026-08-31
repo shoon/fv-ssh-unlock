@@ -38,7 +38,7 @@ func TestListenAndGetJSON(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"ok":true}`)
 	})}
-	go server.Serve(listener)
+	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(func() {
 		_ = server.Shutdown(context.Background())
 		_ = listener.Close()
@@ -97,7 +97,7 @@ func TestListenRefusesLiveSocketWithoutUnlinkingIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer first.Close()
+	defer func() { _ = first.Close() }()
 	if second, err := Listen(path); err == nil {
 		_ = second.Close()
 		t.Fatal("second listener replaced an active control socket")

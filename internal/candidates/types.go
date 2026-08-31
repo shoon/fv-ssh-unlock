@@ -36,6 +36,7 @@ const (
 	EventIgnored           EventType = "ignored"
 	EventRestored          EventType = "restored"
 	EventExpired           EventType = "expired"
+	EventEvicted           EventType = "evicted"
 	EventConfiguredChanged EventType = "configured_changed"
 )
 
@@ -101,10 +102,14 @@ type ConfiguredFingerprint struct {
 	DeviceNames []string `json:"device_names"`
 }
 
-// IngestResult reports the candidate produced by an observation.
+// IngestResult reports the candidate produced by an observation. Dropped marks
+// an observation that matched no existing candidate and could not create one
+// because the inbox was full of operator-reviewed entries; Candidate is then
+// zero and the rest of the round is still applied.
 type IngestResult struct {
 	Candidate Candidate `json:"candidate"`
 	Created   bool      `json:"created"`
+	Dropped   bool      `json:"dropped,omitempty"`
 	MergedIDs []string  `json:"merged_ids,omitempty"`
 }
 

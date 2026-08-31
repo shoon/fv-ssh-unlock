@@ -255,12 +255,126 @@ func TestIngestValidationAndBatchRollback(t *testing.T) {
 	if len(inbox.Snapshot().Candidates) != 0 {
 		t.Fatal("invalid observations changed state")
 	}
-	_, err := inbox.IngestMany([]Observation{
+	if _, err := inbox.IngestMany([]Observation{
+		{Source: "scan", Address: "192.0.2.1"},
+		{Source: "scan", Address: "bad address"},
+	}); err == nil || len(inbox.Snapshot().Candidates) != 0 || inbox.Snapshot().Sequence != 0 {
+		t.Fatalf("batch with an invalid observation was not rolled back: snapshot=%+v", inbox.Snapshot())
+	}
+}
+
+func TestIngestAtCapacityDropsCreationWithoutFailingTheRound(t *testing.T) {
+	clock := newTestClock()
+	inbox := New(Options{Clock: clock.Now, MaxCandidates: 1})
+	results, err := inbox.IngestMany([]Observation{
 		{Source: "scan", Address: "192.0.2.1"},
 		{Source: "scan", Address: "192.0.2.2"},
 	})
-	if err == nil || len(inbox.Snapshot().Candidates) != 0 || inbox.Snapshot().Sequence != 0 {
-		t.Fatalf("failed batch was not rolled back: err=%v snapshot=%+v", err, inbox.Snapshot())
+	if err != nil {
+		t.Fatalf("full inbox failed the round: %v", err)
+	}
+	// The first observation is recorded; the second cannot displace an entry
+	// this same round wrote, so it is dropped rather than failing the batch.
+	if len(results) != 2 || results[0].Dropped || results[0].Candidate.ID == "" || !results[1].Dropped {
+		t.Fatalf("unexpected results: %+v", results)
+	}
+	if inbox.Dropped() != 1 {
+		t.Fatalf("dropped counter = %d, want 1", inbox.Dropped())
+	}
+	candidates := inbox.Snapshot().Candidates
+	if len(candidates) != 1 {
+		t.Fatalf("inbox holds %d candidates, want 1", len(candidates))
+	}
+
+	// A later round must still refresh the candidate that is already recorded.
+	clock.Advance(time.Hour)
+	updated, err := inbox.Ingest(Observation{Source: "scan", Address: "192.0.2.1"})
+	if err != nil {
+		t.Fatalf("update at capacity failed: %v", err)
+	}
+	if updated.Created || updated.Dropped || !updated.Candidate.LastSeen.After(candidates[0].LastSeen) {
+		t.Fatalf("existing candidate was not updated at capacity: %+v", updated)
+	}
+}
+
+func TestIngestAtCapacityEvictsOldestUnreviewedCandidate(t *testing.T) {
+	clock := newTestClock()
+	inbox := New(Options{Clock: clock.Now, MaxCandidates: 2, TTL: -1})
+	oldest, err := inbox.Ingest(Observation{Source: "scan", Address: "192.0.2.1", Fingerprint: testFingerprint("capacity")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inbox.MarkVerified(oldest.Candidate.ID); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Minute)
+	unreviewed, err := inbox.Ingest(Observation{Source: "scan", Address: "192.0.2.2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Minute)
+	fresh, err := inbox.Ingest(Observation{Source: "scan", Address: "192.0.2.3"})
+	if err != nil {
+		t.Fatalf("full inbox failed the round: %v", err)
+	}
+	if fresh.Dropped || !fresh.Created {
+		t.Fatalf("new candidate was not admitted by eviction: %+v", fresh)
+	}
+	ids := make(map[string]bool)
+	for _, candidate := range inbox.Snapshot().Candidates {
+		ids[candidate.ID] = true
+	}
+	if !ids[oldest.Candidate.ID] {
+		t.Fatal("eviction removed an operator-verified candidate")
+	}
+	if ids[unreviewed.Candidate.ID] {
+		t.Fatal("oldest unreviewed candidate was not evicted")
+	}
+	if inbox.Dropped() != 0 {
+		t.Fatalf("dropped counter = %d, want 0", inbox.Dropped())
+	}
+	events := inbox.EventsSince(0).Events
+	last := events[len(events)-2]
+	if last.Type != EventEvicted || last.CandidateID != unreviewed.Candidate.ID {
+		t.Fatalf("eviction event missing: %+v", events)
+	}
+}
+
+func TestIngestAtCapacityNeverEvictsPinnedCandidates(t *testing.T) {
+	clock := newTestClock()
+	inbox := New(Options{Clock: clock.Now, MaxCandidates: 2, TTL: -1})
+	verified, err := inbox.Ingest(Observation{Source: "scan", Address: "192.0.2.1", Fingerprint: testFingerprint("capacity")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inbox.MarkVerified(verified.Candidate.ID); err != nil {
+		t.Fatal(err)
+	}
+	ignored, err := inbox.Ingest(Observation{Source: "scan", Address: "192.0.2.2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inbox.Ignore(ignored.Candidate.ID); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Hour)
+	dropped, err := inbox.Ingest(Observation{Source: "scan", Address: "192.0.2.3"})
+	if err != nil {
+		t.Fatalf("full inbox failed the round: %v", err)
+	}
+	if !dropped.Dropped || dropped.Created {
+		t.Fatalf("pinned candidate was displaced: %+v", dropped)
+	}
+	if inbox.Dropped() != 1 {
+		t.Fatalf("dropped counter = %d, want 1", inbox.Dropped())
+	}
+	if len(inbox.Snapshot().Candidates) != 2 {
+		t.Fatalf("inbox holds %d candidates, want 2", len(inbox.Snapshot().Candidates))
+	}
+	// Updates to the pinned candidates must keep working while at the limit.
+	refreshed, err := inbox.Ingest(Observation{Source: "scan", Address: "192.0.2.1"})
+	if err != nil || refreshed.Dropped || refreshed.Candidate.ID != verified.Candidate.ID {
+		t.Fatalf("existing candidate update was blocked at capacity: result=%+v err=%v", refreshed, err)
 	}
 }
 
