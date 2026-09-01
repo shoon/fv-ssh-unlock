@@ -8,7 +8,7 @@ already has FileVault and Remote Login configured and you know its address and
 local user.
 
 > [!CAUTION]
-> These pages describe the **v0.2.0-rc.2 prerelease**, including the daemon,
+> These pages describe the **v0.2.0-rc.3 prerelease**, including the daemon,
 > TUI, candidate inbox, and secure-provider model. Stable `v0.1.0` does not
 > contain those commands. Use the version-pinned installation instructions in
 > [Getting started](getting-started.md#install-the-client).

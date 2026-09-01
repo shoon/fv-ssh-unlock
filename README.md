@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="https://github.com/shoon/fv-ssh-unlock/actions/workflows/ci.yml"><img src="https://github.com/shoon/fv-ssh-unlock/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
-  <a href="https://github.com/shoon/fv-ssh-unlock/releases/tag/v0.2.0-rc.2"><img src="https://img.shields.io/badge/prerelease-v0.2.0--rc.2-orange" alt="v0.2.0-rc.2 prerelease"></a>
+  <a href="https://github.com/shoon/fv-ssh-unlock/releases/tag/v0.2.0-rc.3"><img src="https://img.shields.io/badge/prerelease-v0.2.0--rc.3-orange" alt="v0.2.0-rc.3 prerelease"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/shoon/fv-ssh-unlock" alt="Apache 2.0 license"></a>
   <img src="https://img.shields.io/badge/Go-1.26.7-00ADD8?logo=go&amp;logoColor=white" alt="Go 1.26.7 or newer">
   <img src="https://img.shields.io/badge/target-macOS%2026%2B-111111" alt="Targets macOS 26 or newer">
@@ -42,7 +42,7 @@ container to recover explicitly authorized Macs after a power event.
 
 > [!CAUTION]
 > The daemon, TUI, candidate inbox, secure-provider model, and service/container
-> deployment described here are the **v0.2.0-rc.2 prerelease**. The current
+> deployment described here are the **v0.2.0-rc.3 prerelease**. The current
 > stable `v0.1.0` release does not contain those commands. Use the pinned
 > prerelease downloads and installation commands below while evaluating them.
 
@@ -132,8 +132,8 @@ scoop bucket add shoon https://github.com/shoon/scoop-bucket
 scoop install shoon/fv-ssh-unlock
 ```
 
-Or download the `v0.2.0-rc.2` archive for your client computer from the
-[prerelease page](https://github.com/shoon/fv-ssh-unlock/releases/tag/v0.2.0-rc.2),
+Or download the `v0.2.0-rc.3` archive for your client computer from the
+[prerelease page](https://github.com/shoon/fv-ssh-unlock/releases/tag/v0.2.0-rc.3),
 extract it, and place `fv-ssh-unlock` or `fv-ssh-unlock.exe` on your `PATH`.
 Release binaries include OS-keyring support.
 
@@ -143,7 +143,7 @@ Linux DEB/RPM availability, and the stable-only WinGet plan.
 You can also build from source:
 
 ```bash
-git clone --branch v0.2.0-rc.2 --depth 1 \
+git clone --branch v0.2.0-rc.3 --depth 1 \
   https://github.com/shoon/fv-ssh-unlock.git
 cd fv-ssh-unlock
 go build -tags keyring -o fv-ssh-unlock ./cmd/fv-ssh-unlock
@@ -236,7 +236,7 @@ The [public minimal container](https://hub.docker.com/r/shoonimages/fv-ssh-unloc
 is also available as a versioned prerelease image:
 
 ```bash
-docker pull shoonimages/fv-ssh-unlock:v0.2.0-rc.2
+docker pull shoonimages/fv-ssh-unlock:v0.2.0-rc.3
 ```
 
 Do not start it with an ad hoc password bind mount. The
