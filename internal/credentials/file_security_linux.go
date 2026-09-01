@@ -13,9 +13,13 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// Kernel filesystem magic numbers are unsigned 32-bit values, but
+// unix.Statfs_t.Type is int32 on 32-bit Linux and int64 on 64-bit Linux, so
+// ramfsMagic (> MaxInt32) sign-extends differently per platform. Comparing
+// through uint32 is the one form that is correct and compiles on both.
 const (
-	tmpfsMagic int64 = 0x01021994
-	ramfsMagic int64 = 0x858458f6
+	tmpfsMagic uint32 = 0x01021994
+	ramfsMagic uint32 = 0x858458f6
 )
 
 func platformSecureCredentialFile(path string, _ os.FileInfo) (bool, string) {
@@ -48,5 +52,6 @@ func memoryBackedFilesystem(path string) bool {
 	if err := unix.Statfs(path, &stat); err != nil {
 		return false
 	}
-	return stat.Type == tmpfsMagic || stat.Type == ramfsMagic
+	// #nosec G115 -- deliberate truncation: magics are 32-bit kernel values, see the constant block.
+	return uint32(stat.Type) == tmpfsMagic || uint32(stat.Type) == ramfsMagic
 }
