@@ -68,6 +68,44 @@ type daemonOptions struct {
 	once              bool
 }
 
+// trackedHandler closes admission before shutdown and joins every request that
+// was already running. http.Server.Close cancels connections but does not wait
+// for their handlers, which is not sufficient for transactional enrollment.
+type trackedHandler struct {
+	handler http.Handler
+
+	mu        sync.Mutex
+	accepting bool
+	active    sync.WaitGroup
+}
+
+func newTrackedHandler(handler http.Handler) *trackedHandler {
+	return &trackedHandler{handler: handler, accepting: true}
+}
+
+func (h *trackedHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	if !h.accepting {
+		h.mu.Unlock()
+		http.Error(w, "daemon is shutting down", http.StatusServiceUnavailable)
+		return
+	}
+	h.active.Add(1)
+	h.mu.Unlock()
+	defer h.active.Done()
+	h.handler.ServeHTTP(w, r)
+}
+
+func (h *trackedHandler) StopAccepting() {
+	h.mu.Lock()
+	h.accepting = false
+	h.mu.Unlock()
+}
+
+func (h *trackedHandler) Wait() {
+	h.active.Wait()
+}
+
 func newDaemonCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "daemon",
@@ -226,7 +264,7 @@ func runDaemon(ctx context.Context, output io.Writer, opts daemonOptions) (retur
 	// operation. Each monitor call has its own context deadline, so using the
 	// maximum here cannot lengthen a probe but using the minimum would silently
 	// cap an unlock at the probe budget (15s with the defaults).
-	dialTimeout := maxDuration(opts.probeTimeout, opts.unlockTimeout)
+	dialTimeout := max(opts.probeTimeout, opts.unlockTimeout)
 	client, err := newSSHClient(false, false, false, opts.identityFiles, dialTimeout)
 	if err != nil {
 		return err
@@ -272,7 +310,7 @@ func runDaemon(ctx context.Context, output io.Writer, opts daemonOptions) (retur
 	api := &daemonAPI{
 		startedAt: time.Now().UTC(), engine: engine, inbox: inbox, store: store, adapter: adapter,
 		identities: opts.identityFiles, probeTimeout: opts.probeTimeout, unlockTimeout: opts.unlockTimeout,
-		dialTimeout: dialTimeout, logger: logger,
+		logger: logger,
 	}
 	eventBuffer := max(256, min(16384, len(configured)*8))
 	events, stopEvents := engine.Subscribe(eventBuffer)
@@ -283,8 +321,9 @@ func runDaemon(ctx context.Context, output io.Writer, opts daemonOptions) (retur
 		defer eventLogWG.Done()
 		logMonitorEvents(logger, events)
 	}()
+	handlers := newTrackedHandler(api.routes())
 	server := &http.Server{
-		Handler:           api.routes(),
+		Handler:           handlers,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      controlPollTimeout(opts.probeTimeout, opts.unlockTimeout),
@@ -323,12 +362,19 @@ func runDaemon(ctx context.Context, output io.Writer, opts daemonOptions) (retur
 	// could terminate the process while an unlock outcome was still being
 	// written to durable episode state.
 	stopRun()
+	handlers.StopAccepting()
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelShutdown()
 	shutdownErr := server.Shutdown(shutdownCtx)
 	if shutdownErr != nil {
 		_ = server.Close()
 	}
+	// Shutdown waits for ordinary HTTP handlers, but Close does not. Track and
+	// join them explicitly so a timed-out shutdown cannot return midway through
+	// enrollment or rollback.
+	handlers.Wait()
+	componentCtx, cancelComponents := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelComponents()
 	for completed < cap(errCh) {
 		select {
 		case runErr := <-errCh:
@@ -336,9 +382,9 @@ func runDaemon(ctx context.Context, output io.Writer, opts daemonOptions) (retur
 			if runErr != nil && componentErr == nil {
 				componentErr = runErr
 			}
-		case <-shutdownCtx.Done():
+		case <-componentCtx.Done():
 			_ = server.Close()
-			timeoutErr := fmt.Errorf("daemon shutdown timed out before all components stopped: %w", shutdownCtx.Err())
+			timeoutErr := fmt.Errorf("daemon shutdown timed out before all components stopped: %w", componentCtx.Err())
 			if componentErr != nil {
 				return errors.Join(componentErr, timeoutErr)
 			}
@@ -358,7 +404,20 @@ func runDaemon(ctx context.Context, output io.Writer, opts daemonOptions) (retur
 }
 
 func newDaemonLogger(output io.Writer, opts daemonOptions) *slog.Logger {
-	loggerOptions := &slog.HandlerOptions{Level: opts.logLevel}
+	loggerOptions := &slog.HandlerOptions{
+		Level: opts.logLevel,
+		ReplaceAttr: func(_ []string, attr slog.Attr) slog.Attr {
+			switch attr.Value.Kind() {
+			case slog.KindString:
+				attr.Value = slog.StringValue(terminalSafeInline(attr.Value.String()))
+			case slog.KindAny:
+				if err, ok := attr.Value.Any().(error); ok {
+					attr.Value = slog.StringValue(terminalSafeError(err))
+				}
+			}
+			return attr
+		},
+	}
 	var handler slog.Handler = slog.NewTextHandler(output, loggerOptions)
 	if opts.logFormat == "json" {
 		handler = slog.NewJSONHandler(output, loggerOptions)
@@ -375,24 +434,22 @@ func newDaemonRunID() string {
 	return hex.EncodeToString(value[:])
 }
 
-func acquireDaemonLock(path string) (*os.File, error) {
-	lock, err := securefs.OpenPrivate(path, "daemon lock", os.O_CREATE|os.O_RDWR)
+func acquireDaemonLock(path string) (*securefs.FileLock, error) {
+	lock, err := securefs.TryAcquireLock(path, "daemon")
 	if err != nil {
+		if errors.Is(err, securefs.ErrLockUnavailable) {
+			return nil, fmt.Errorf("another daemon is already using this data directory: %w", err)
+		}
 		return nil, fmt.Errorf("open daemon lock: %w", err)
-	}
-	if err := tryLockDaemonFile(lock); err != nil {
-		_ = lock.Close()
-		return nil, fmt.Errorf("another daemon is already using this data directory: %w", err)
 	}
 	return lock, nil
 }
 
-func releaseDaemonLock(lock *os.File) {
+func releaseDaemonLock(lock *securefs.FileLock) {
 	if lock == nil {
 		return
 	}
-	unlockKnownHostsFile(lock)
-	_ = lock.Close()
+	lock.Release()
 }
 
 func logMonitorEvents(logger *slog.Logger, events <-chan monitor.Event) {
@@ -634,7 +691,7 @@ func (a *daemonAdapter) Probe(ctx context.Context, target monitor.Device) (monit
 		}
 		a.setEndpointDown(target.Name, false)
 	}
-	state, _, err := fvcore.CheckStatus(ctx, a.client, deviceEndpoint(device), device.User, remainingTimeout(ctx, a.probeTimeout))
+	state, _, err := fvcore.CheckStatus(ctx, a.client, deviceEndpoint(device), device.User, a.probeTimeout)
 	switch {
 	case state == fvcore.StatusLocked:
 		a.setEndpointDown(target.Name, false)
@@ -722,7 +779,7 @@ func (a *daemonAdapter) Unlock(ctx context.Context, target monitor.Device) (moni
 	if successMessage == "" {
 		successMessage = defaultSuccessMessage
 	}
-	result := fvcore.Unlock(ctx, a.client, &staticStore{pw: password}, deviceEndpoint(device), device.User, deviceCredentialID(device), successMessage, remainingTimeout(ctx, a.unlockTimeout))
+	result := fvcore.Unlock(ctx, a.client, &staticStore{pw: password}, deviceEndpoint(device), device.User, deviceCredentialID(device), successMessage, a.unlockTimeout)
 	switch {
 	case result.Status == fvcore.StatusUnlocked:
 		return monitor.UnlockResult{Accepted: true, Detail: "FileVault accepted the credential"}, nil
@@ -746,29 +803,6 @@ func (a *daemonAdapter) Unlock(ctx context.Context, target monitor.Device) (moni
 	default:
 		return monitor.UnlockResult{}, monitor.NewFailure(monitor.FailureTransient, errors.New("unlock result was inconclusive before credential submission"))
 	}
-}
-
-// remainingTimeout returns the operation budget to apply: the caller-configured
-// fallback, shortened only when the context deadline would expire sooner. It
-// never lengthens a budget, so an already-expired context yields the fallback
-// and the operation fails on the context instead.
-func remainingTimeout(ctx context.Context, fallback time.Duration) time.Duration {
-	if deadline, ok := ctx.Deadline(); ok {
-		remaining := time.Until(deadline)
-		if remaining > 0 && remaining < fallback {
-			return remaining
-		}
-	}
-	return fallback
-}
-
-// maxDuration returns the larger operation budget. A shared SSH client's dial
-// timeout uses it while the per-operation context enforces the smaller budget.
-func maxDuration(a, b time.Duration) time.Duration {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 // durationSum adds positive duration budgets without allowing overflow to wrap
@@ -890,7 +924,7 @@ func runCandidateDiscovery(ctx context.Context, inbox *candidates.Inbox, opts da
 
 func logCandidateResults(logger *slog.Logger, source string, results []candidates.IngestResult) {
 	for _, result := range results {
-		if result.Dropped {
+		if result.DroppedObservation != nil {
 			attrs := []any{
 				"event", "candidate.dropped",
 				"source", terminalSafeInline(source),
@@ -1019,7 +1053,6 @@ type daemonAPI struct {
 	// control clients use the same limits as ordinary monitoring.
 	probeTimeout  time.Duration
 	unlockTimeout time.Duration
-	dialTimeout   time.Duration
 	logger        *slog.Logger
 	mutationMu    sync.Mutex
 	// enrolling reserves candidates whose enrollment probe is in flight. The
@@ -1260,7 +1293,7 @@ func (a *daemonAPI) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	// mutation for that long, past the control server's write timeout, so it
 	// runs unlocked and the preconditions are re-checked below. It only reads
 	// the candidate's key; nothing is pinned or configured yet.
-	pending, err := probeExpectedHostKey(r.Context(), device, candidate.Fingerprint, a.identities, a.dialTimeout, a.probeTimeout)
+	pending, err := probeExpectedHostKey(r.Context(), device, candidate.Fingerprint, a.identities, max(a.probeTimeout, a.unlockTimeout), a.probeTimeout)
 	if err != nil {
 		writeAPIError(w, http.StatusBadGateway, err)
 		return
@@ -1292,7 +1325,11 @@ func (a *daemonAPI) handleEnroll(w http.ResponseWriter, r *http.Request) {
 
 	// Register first, pin second: an enrollment that fails after this point is
 	// rolled back completely, so configuration and trust state never diverge.
-	if err := a.store.Add(device); err != nil {
+	if err := a.store.AddContext(r.Context(), device); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			writeAPIError(w, http.StatusRequestTimeout, err)
+			return
+		}
 		writeAPIError(w, http.StatusConflict, err)
 		return
 	}
@@ -1306,9 +1343,13 @@ func (a *daemonAPI) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		a.failEnrollment(w, http.StatusInternalServerError, device, pendingHostKey{}, err)
 		return
 	}
-	insertedHostKey, err := commitPendingHostKey(knownHosts, pending)
+	insertedHostKey, err := commitPendingHostKeyContext(r.Context(), knownHosts, pending)
 	if err != nil {
-		a.failEnrollment(w, http.StatusBadGateway, device, pendingHostKey{}, err)
+		owned := pendingHostKey{}
+		if insertedHostKey {
+			owned = pending
+		}
+		a.failEnrollment(w, http.StatusBadGateway, device, owned, err)
 		return
 	}
 	pinnedByEnrollment := pendingHostKey{}
@@ -1357,16 +1398,18 @@ func (a *daemonAPI) failEnrollment(w http.ResponseWriter, status int, device con
 // order. A zero pinned key means the host key was never recorded.
 func (a *daemonAPI) rollbackEnrollment(device config.Device, pinned pendingHostKey) error {
 	a.adapter.removeDevice(device.Name)
+	ctx, cancel := context.WithTimeout(context.Background(), controlOperationOverhead)
+	defer cancel()
 	var errs []error
 	if pinned.key != nil {
 		path, err := knownHostsPath()
 		if err != nil {
 			errs = append(errs, fmt.Errorf("locate known_hosts: %w", err))
-		} else if err := removeKnownHost(path, pinned.hostname, pinned.key); err != nil {
+		} else if err := removeKnownHostContext(ctx, path, pinned.hostname, pinned.key); err != nil {
 			errs = append(errs, fmt.Errorf("unpin host key: %w", err))
 		}
 	}
-	if err := a.store.Remove(device.Name); err != nil {
+	if err := a.store.RemoveIfUnchangedContext(ctx, device); err != nil {
 		errs = append(errs, fmt.Errorf("remove configuration entry: %w", err))
 	}
 	err := errors.Join(errs...)
@@ -1386,7 +1429,7 @@ func probeExpectedHostKey(ctx context.Context, device config.Device, fingerprint
 		return pendingHostKey{}, err
 	}
 	var pending pendingHostKey
-	callback, err := hostKeyCallbackFunc(path, true, fingerprint, func(observed pendingHostKey) error {
+	callback, err := hostKeyCallbackFuncContext(ctx, path, true, fingerprint, func(observed pendingHostKey) error {
 		pending = observed
 		return nil
 	})

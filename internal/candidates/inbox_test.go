@@ -311,11 +311,8 @@ func TestIngestAtCapacityDropsCreationWithoutFailingTheRound(t *testing.T) {
 	}
 	// The first observation is recorded; the second cannot displace an entry
 	// this same round wrote, so it is dropped rather than failing the batch.
-	if len(results) != 2 || results[0].Dropped || results[0].Candidate.ID == "" || !results[1].Dropped {
+	if len(results) != 2 || results[0].DroppedObservation != nil || results[0].Candidate.ID == "" || results[1].DroppedObservation == nil {
 		t.Fatalf("unexpected results: %+v", results)
-	}
-	if inbox.Dropped() != 1 {
-		t.Fatalf("dropped counter = %d, want 1", inbox.Dropped())
 	}
 	snapshot := inbox.Snapshot()
 	if snapshot.DroppedObservations != 1 || snapshot.EvictedCandidates != 0 || snapshot.Sequence != 2 {
@@ -342,7 +339,7 @@ func TestIngestAtCapacityDropsCreationWithoutFailingTheRound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("update at capacity failed: %v", err)
 	}
-	if updated.Created || updated.Dropped || !updated.Candidate.LastSeen.After(candidates[0].LastSeen) {
+	if updated.Created || updated.DroppedObservation != nil || !updated.Candidate.LastSeen.After(candidates[0].LastSeen) {
 		t.Fatalf("existing candidate was not updated at capacity: %+v", updated)
 	}
 }
@@ -360,7 +357,7 @@ func TestCapacityTelemetryIsJSONVisibleAndEventHistoryRemainsBounded(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.Dropped {
+	if result.DroppedObservation == nil {
 		t.Fatalf("capacity observation was not dropped: %+v", result)
 	}
 	payload := mustJSON(t, inbox.Snapshot())
@@ -414,7 +411,7 @@ func TestIngestAtCapacityEvictsOldestUnreviewedCandidate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("full inbox failed the round: %v", err)
 	}
-	if fresh.Dropped || !fresh.Created {
+	if fresh.DroppedObservation != nil || !fresh.Created {
 		t.Fatalf("new candidate was not admitted by eviction: %+v", fresh)
 	}
 	ids := make(map[string]bool)
@@ -427,11 +424,9 @@ func TestIngestAtCapacityEvictsOldestUnreviewedCandidate(t *testing.T) {
 	if ids[unreviewed.Candidate.ID] {
 		t.Fatal("oldest unreviewed candidate was not evicted")
 	}
-	if inbox.Dropped() != 0 {
-		t.Fatalf("dropped counter = %d, want 0", inbox.Dropped())
-	}
-	if inbox.Evicted() != 1 || inbox.Snapshot().EvictedCandidates != 1 {
-		t.Fatalf("evicted counter = %d snapshot=%+v, want 1", inbox.Evicted(), inbox.Snapshot())
+	snapshot := inbox.Snapshot()
+	if snapshot.DroppedObservations != 0 || snapshot.EvictedCandidates != 1 {
+		t.Fatalf("capacity counters = %+v, want zero dropped and one evicted", snapshot)
 	}
 	if len(fresh.EvictedIDs) != 1 || fresh.EvictedIDs[0] != unreviewed.Candidate.ID {
 		t.Fatalf("evicted ID was not returned for logging: %+v", fresh)
@@ -465,18 +460,18 @@ func TestIngestAtCapacityNeverEvictsPinnedCandidates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("full inbox failed the round: %v", err)
 	}
-	if !dropped.Dropped || dropped.Created {
+	if dropped.DroppedObservation == nil || dropped.Created {
 		t.Fatalf("pinned candidate was displaced: %+v", dropped)
 	}
-	if inbox.Dropped() != 1 {
-		t.Fatalf("dropped counter = %d, want 1", inbox.Dropped())
+	if droppedCount := inbox.Snapshot().DroppedObservations; droppedCount != 1 {
+		t.Fatalf("dropped counter = %d, want 1", droppedCount)
 	}
 	if len(inbox.Snapshot().Candidates) != 2 {
 		t.Fatalf("inbox holds %d candidates, want 2", len(inbox.Snapshot().Candidates))
 	}
 	// Updates to the pinned candidates must keep working while at the limit.
 	refreshed, err := inbox.Ingest(Observation{Source: "scan", Address: "192.0.2.1"})
-	if err != nil || refreshed.Dropped || refreshed.Candidate.ID != verified.Candidate.ID {
+	if err != nil || refreshed.DroppedObservation != nil || refreshed.Candidate.ID != verified.Candidate.ID {
 		t.Fatalf("existing candidate update was blocked at capacity: result=%+v err=%v", refreshed, err)
 	}
 }

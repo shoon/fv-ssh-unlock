@@ -6,9 +6,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -109,6 +109,10 @@ type pendingHostKey struct {
 // pinning the key later (see commitPendingHostKey). Changed-key rejection and
 // the expectedFingerprint check are identical in both modes.
 func hostKeyCallbackFunc(path string, acceptNew bool, expectedFingerprint string, onAccept func(pendingHostKey) error) (ssh.HostKeyCallback, error) {
+	return hostKeyCallbackFuncContext(context.Background(), path, acceptNew, expectedFingerprint, onAccept)
+}
+
+func hostKeyCallbackFuncContext(ctx context.Context, path string, acceptNew bool, expectedFingerprint string, onAccept func(pendingHostKey) error) (ssh.HostKeyCallback, error) {
 	if err := prepareKnownHosts(path); err != nil {
 		return nil, err
 	}
@@ -119,7 +123,7 @@ func hostKeyCallbackFunc(path string, acceptNew bool, expectedFingerprint string
 	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 		mu.Lock()
 		defer mu.Unlock()
-		return withKnownHostsLock(path, func() error {
+		return withKnownHostsLockContext(ctx, path, func() error {
 			return verifyHostKeyLocked(path, acceptNew, expectedFingerprint, onAccept, hostname, remote, key)
 		})
 	}, nil
@@ -182,15 +186,15 @@ func verifyHostKeyLocked(path string, acceptNew bool, expectedFingerprint string
 // concurrent processes cannot enroll different keys for the same host or read a
 // half-written file.
 func withKnownHostsLock(path string, fn func() error) error {
-	lock, err := securefs.OpenPrivate(path+".lock", "known_hosts lock", os.O_CREATE|os.O_RDWR)
+	return withKnownHostsLockContext(context.Background(), path, fn)
+}
+
+func withKnownHostsLockContext(ctx context.Context, path string, fn func() error) error {
+	lock, err := securefs.AcquireLockContext(ctx, path+".lock", "known_hosts")
 	if err != nil {
-		return fmt.Errorf("open known_hosts lock: %w", err)
+		return err
 	}
-	defer func() { _ = lock.Close() }()
-	if err := lockKnownHostsFile(lock); err != nil {
-		return fmt.Errorf("lock known_hosts: %w", err)
-	}
-	defer unlockKnownHostsFile(lock)
+	defer lock.Release()
 	return fn()
 }
 
@@ -204,11 +208,19 @@ func withKnownHostsLock(path string, fn func() error) error {
 // the line, allowing a later rollback to remove only state owned by its
 // enrollment transaction.
 func commitPendingHostKey(path string, pending pendingHostKey) (bool, error) {
+	return commitPendingHostKeyContext(context.Background(), path, pending)
+}
+
+func commitPendingHostKeyContext(ctx context.Context, path string, pending pendingHostKey) (bool, error) {
+	return commitPendingHostKeyWithAppender(ctx, path, pending, appendKnownHost)
+}
+
+func commitPendingHostKeyWithAppender(ctx context.Context, path string, pending pendingHostKey, appendEntry func(string, string, ssh.PublicKey) error) (bool, error) {
 	if pending.key == nil {
 		return false, nil
 	}
 	inserted := false
-	err := withKnownHostsLock(path, func() error {
+	err := withKnownHostsLockContext(ctx, path, func() error {
 		base, err := knownhosts.New(path)
 		if err != nil {
 			return fmt.Errorf("read known_hosts: %w", err)
@@ -219,7 +231,12 @@ func commitPendingHostKey(path string, pending pendingHostKey) (bool, error) {
 		}
 		var keyErr *knownhosts.KeyError
 		if errors.As(verr, &keyErr) && len(keyErr.Want) == 0 {
-			if aerr := appendKnownHost(path, pending.hostname, pending.key); aerr != nil {
+			if aerr := appendEntry(path, pending.hostname, pending.key); aerr != nil {
+				present, inspectErr := knownHostLinePresent(path, pending.hostname, pending.key)
+				inserted = present
+				if inspectErr != nil {
+					return errors.Join(fmt.Errorf("failed to record host key for %s: %w", pending.hostname, aerr), fmt.Errorf("reconcile known_hosts write: %w", inspectErr))
+				}
 				return fmt.Errorf("failed to record host key for %s: %w", pending.hostname, aerr)
 			}
 			inserted = true
@@ -236,21 +253,17 @@ func commitPendingHostKey(path string, pending pendingHostKey) (bool, error) {
 // operator-authored entry for the same host is never disturbed. It is used to
 // roll back an enrollment that failed after the key was pinned.
 func removeKnownHost(path, hostname string, key ssh.PublicKey) error {
+	return removeKnownHostContext(context.Background(), path, hostname, key)
+}
+
+func removeKnownHostContext(ctx context.Context, path, hostname string, key ssh.PublicKey) error {
 	if key == nil {
 		return nil
 	}
 	target := []byte(knownhosts.Line([]string{knownhosts.Normalize(hostname)}, key))
-	return withKnownHostsLock(path, func() error {
-		f, err := securefs.OpenPrivate(path, "known_hosts", os.O_RDONLY)
+	return withKnownHostsLockContext(ctx, path, func() error {
+		content, err := securefs.ReadPrivate(path, "known_hosts", maxKnownHostsSize)
 		if err != nil {
-			return err
-		}
-		content, err := io.ReadAll(f)
-		if err != nil {
-			_ = f.Close()
-			return err
-		}
-		if err := f.Close(); err != nil {
 			return err
 		}
 		kept := make([][]byte, 0, bytes.Count(content, []byte{'\n'})+1)
@@ -293,18 +306,32 @@ func preparePrivateRegularFile(path, description string) error {
 
 // appendKnownHost records a host key in OpenSSH known_hosts format.
 func appendKnownHost(path, hostname string, key ssh.PublicKey) error {
-	f, err := securefs.OpenPrivate(path, "known_hosts", os.O_APPEND|os.O_WRONLY)
+	content, err := securefs.ReadPrivate(path, "known_hosts", maxKnownHostsSize)
 	if err != nil {
 		return err
 	}
 	line := knownhosts.Line([]string{knownhosts.Normalize(hostname)}, key)
-	if _, err = f.WriteString(line + "\n"); err != nil {
-		_ = f.Close()
-		return err
+	if len(content) > 0 && content[len(content)-1] != '\n' {
+		content = append(content, '\n')
 	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		return err
+	content = append(content, line...)
+	content = append(content, '\n')
+	if len(content) > maxKnownHostsSize {
+		return fmt.Errorf("known_hosts exceeds %d bytes", maxKnownHostsSize)
 	}
-	return f.Close()
+	return securefs.WritePrivate(path, "known_hosts", ".known-hosts-*.tmp", content)
+}
+
+func knownHostLinePresent(path, hostname string, key ssh.PublicKey) (bool, error) {
+	content, err := securefs.ReadPrivate(path, "known_hosts", maxKnownHostsSize)
+	if err != nil {
+		return false, err
+	}
+	target := []byte(knownhosts.Line([]string{knownhosts.Normalize(hostname)}, key))
+	for _, line := range bytes.Split(content, []byte{'\n'}) {
+		if bytes.Equal(bytes.TrimRight(line, "\r"), target) {
+			return true, nil
+		}
+	}
+	return false, nil
 }

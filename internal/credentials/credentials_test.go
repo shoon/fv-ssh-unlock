@@ -9,13 +9,12 @@ package credentials
 
 import (
 	"errors"
-	"os"
 	"strings"
 	"testing"
 )
 
 func TestGetEnvCredential(t *testing.T) {
-	os.Setenv("FV_UNLOCK_PASSWORD_TESTDEVICE", "supersecret")
+	t.Setenv("FV_UNLOCK_PASSWORD_TESTDEVICE", "supersecret")
 	pw, err := Get("testdevice")
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
@@ -26,7 +25,7 @@ func TestGetEnvCredential(t *testing.T) {
 }
 
 func TestGetEnvCredentialNotSet(t *testing.T) {
-	os.Unsetenv("FV_UNLOCK_PASSWORD_NODEVICE")
+	t.Setenv("FV_UNLOCK_PASSWORD_NODEVICE", "")
 	_, err := Get("nodevice")
 	if err == nil || !strings.Contains(err.Error(), "FV_UNLOCK_PASSWORD_NODEVICE") {
 		t.Fatalf("expected error for missing env var, got %v", err)

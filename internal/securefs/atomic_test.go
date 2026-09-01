@@ -3,6 +3,7 @@
 package securefs
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestVerifyPrivateFileRejectsNilAndInsecureMode(t *testing.T) {
@@ -122,6 +124,26 @@ func TestWritePrivateReplacesAtomicallyWithPrivateMode(t *testing.T) {
 	}
 }
 
+func TestReadPrivateReturnsBoundedVerifiedContent(t *testing.T) {
+	path := filepath.Join(privateTestDir(t), "state.json")
+	if err := WritePrivate(path, "test state", ".state-*.tmp", []byte("payload")); err != nil {
+		t.Fatal(err)
+	}
+	data, err := ReadPrivate(path, "test state", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "payload" {
+		t.Fatalf("content = %q, want payload", data)
+	}
+	if _, err := ReadPrivate(path, "test state", 6); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized read error = %v", err)
+	}
+	if _, err := ReadPrivate(path, "test state", -1); err == nil {
+		t.Fatal("negative maximum was accepted")
+	}
+}
+
 func TestWritePrivateAndOpenStableRefuseSymlinks(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("creating symlinks requires additional privileges on Windows")
@@ -209,6 +231,57 @@ func TestAcquireLockSerializesHolders(t *testing.T) {
 	lock.Release()
 	lock.Release()
 	wg.Wait()
+}
+
+func TestAcquireLockContextStopsWaitingWhenCancelled(t *testing.T) {
+	if runtime.GOOS != "windows" && runtime.GOOS != "linux" && runtime.GOOS != "darwin" && runtime.GOOS != "freebsd" && runtime.GOOS != "openbsd" && runtime.GOOS != "netbsd" && runtime.GOOS != "dragonfly" && runtime.GOOS != "aix" && runtime.GOOS != "solaris" {
+		t.Skip("platform does not provide a cross-process file lock")
+	}
+	path := filepath.Join(privateTestDir(t), "devices.json.lock")
+	first, err := AcquireLock(path, "test store")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Release()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	second, err := AcquireLockContext(ctx, path, "test store")
+	if second != nil {
+		second.Release()
+		t.Fatal("cancelled lock acquisition unexpectedly succeeded")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("lock error = %v, want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("cancelled lock acquisition took %v", elapsed)
+	}
+}
+
+func TestTryAcquireLockReportsContentionAndCanBeReused(t *testing.T) {
+	if runtime.GOOS != "windows" && runtime.GOOS != "linux" && runtime.GOOS != "darwin" && runtime.GOOS != "freebsd" && runtime.GOOS != "openbsd" && runtime.GOOS != "netbsd" && runtime.GOOS != "dragonfly" && runtime.GOOS != "aix" && runtime.GOOS != "solaris" {
+		t.Skip("platform does not provide a cross-process file lock")
+	}
+	path := filepath.Join(privateTestDir(t), "daemon.lock")
+	first, err := TryAcquireLock(path, "daemon")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second, err := TryAcquireLock(path, "daemon"); !errors.Is(err, ErrLockUnavailable) {
+		if second != nil {
+			second.Release()
+		}
+		first.Release()
+		t.Fatalf("contended try-lock error = %v, want ErrLockUnavailable", err)
+	}
+	first.Release()
+	third, err := TryAcquireLock(path, "daemon")
+	if err != nil {
+		t.Fatalf("released try-lock could not be reused: %v", err)
+	}
+	third.Release()
 }
 
 func privateTestDir(t *testing.T) string {

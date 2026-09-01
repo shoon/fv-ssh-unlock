@@ -230,7 +230,7 @@ func (b *Inbox) ingestLocked(observation Observation, touched map[string]struct{
 				b.dropped++
 				event := b.makeEventLocked(EventDropped, nil, nil, observation.ObservedAt)
 				observed := observation
-				return IngestResult{Dropped: true, DroppedObservation: &observed}, []Event{event}, nil
+				return IngestResult{DroppedObservation: &observed}, []Event{event}, nil
 			}
 			delete(b.entries, victim.ID)
 			b.evicted++
@@ -312,24 +312,6 @@ func (b *Inbox) evictionTargetLocked(touched map[string]struct{}) *Candidate {
 func candidatePinned(candidate *Candidate) bool {
 	return candidate.State == StateVerified || candidate.State == StateIgnored ||
 		candidate.VerifiedAt != nil || len(candidate.ConfiguredNames) > 0
-}
-
-// Dropped reports how many observations could not create a candidate because
-// the inbox was full of operator-reviewed entries. The counter is cumulative
-// for the life of the process and lets a caller log or surface silent loss
-// without failing a discovery round.
-func (b *Inbox) Dropped() uint64 {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	return b.dropped
-}
-
-// Evicted reports how many unreviewed candidates were displaced to admit a
-// newer observation during the life of this process.
-func (b *Inbox) Evicted() uint64 {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	return b.evicted
 }
 
 // MarkVerified records that an operator verified the displayed fingerprint.

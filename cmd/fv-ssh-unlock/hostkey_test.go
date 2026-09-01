@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
@@ -15,9 +16,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/shoon/fv-ssh-unlock/internal/securefs"
 	"github.com/shoon/fv-ssh-unlock/pkg/fvcore"
 )
 
@@ -392,6 +395,53 @@ func TestPendingHostKeyCommitDoesNotClaimAnotherWritersIdenticalEntry(t *testing
 	}
 	if err := callback(pending.hostname, pending.remote, key); err != nil {
 		t.Fatalf("another writer's entry was removed: %v", err)
+	}
+}
+
+func TestPendingHostKeyCommitReportsOwnershipAfterLateWriteError(t *testing.T) {
+	path := privateKnownHostsTestPath(t)
+	if err := prepareKnownHosts(path); err != nil {
+		t.Fatal(err)
+	}
+	pending := pendingHostKey{hostname: "host.example:22", remote: &net.TCPAddr{}, key: testPublicKey(t)}
+	wantErr := errors.New("directory sync failed")
+	inserted, err := commitPendingHostKeyWithAppender(context.Background(), path, pending,
+		func(path, hostname string, key ssh.PublicKey) error {
+			if err := appendKnownHost(path, hostname, key); err != nil {
+				return err
+			}
+			return wantErr
+		})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("commit error = %v, want late write error", err)
+	}
+	if !inserted {
+		t.Fatal("commit did not report ownership of the visible entry")
+	}
+	if err := removeKnownHost(path, pending.hostname, pending.key); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(mustReadFile(t, path))); got != "" {
+		t.Fatalf("rollback left host key behind: %q", got)
+	}
+}
+
+func TestPendingHostKeyCommitCancelsWhileWaitingForTheLock(t *testing.T) {
+	path := privateKnownHostsTestPath(t)
+	if err := prepareKnownHosts(path); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := securefs.AcquireLock(path+".lock", "known_hosts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Release()
+	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
+	defer cancel()
+	pending := pendingHostKey{hostname: "host.example:22", remote: &net.TCPAddr{}, key: testPublicKey(t)}
+	inserted, err := commitPendingHostKeyContext(ctx, path, pending)
+	if inserted || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("cancelled commit = inserted %t, error %v", inserted, err)
 	}
 }
 

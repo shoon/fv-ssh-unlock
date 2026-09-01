@@ -48,30 +48,12 @@ func (b *Inbox) saveLocked() error {
 }
 
 func loadState(path string) (*diskState, error) {
-	file, err := securefs.OpenStable(path, "candidate inbox")
+	data, err := securefs.ReadPrivate(path, "candidate inbox", maxStoreSize)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
-	}
-	defer func() { _ = file.Close() }()
-	info, err := file.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if info.Size() > maxStoreSize {
-		return nil, fmt.Errorf("candidate inbox exceeds %d bytes", maxStoreSize)
-	}
-	if err := securefs.VerifyPrivateFile(file); err != nil {
-		return nil, fmt.Errorf("insecure candidate inbox %s: %w", path, err)
-	}
-	data, err := io.ReadAll(io.LimitReader(file, maxStoreSize+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(data) > maxStoreSize {
-		return nil, fmt.Errorf("candidate inbox exceeds %d bytes", maxStoreSize)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()

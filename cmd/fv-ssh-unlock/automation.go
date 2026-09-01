@@ -83,7 +83,7 @@ func newAutoUnlockConfigCommand() *cobra.Command {
 				if enable {
 					state = "enabled"
 				}
-				fmt.Fprintf(cmd.OutOrStdout(), "Automatic unlock %s for %q. Restart a running daemon to load this external configuration change; startup will fail closed unless the credential provider is secure and available.\n", state, terminalSafeInline(device.Name))
+				terminalWritef(cmd.OutOrStdout(), "Automatic unlock %s for %q. Restart a running daemon to load this external configuration change; startup will fail closed unless the credential provider is secure and available.\n", state, terminalSafeInline(device.Name))
 				return nil
 			}
 			return fmt.Errorf("device not found: %s", args[0])
@@ -146,11 +146,11 @@ generated directly by configuration-management tools such as Ansible.`,
 				return json.NewEncoder(cmd.OutOrStdout()).Encode(report)
 			}
 			if !report.Changed {
-				fmt.Fprintf(cmd.OutOrStdout(), "Device inventory already matches (%d device(s)).\n", len(desired))
+				terminalWritef(cmd.OutOrStdout(), "Device inventory already matches (%d device(s)).\n", len(desired))
 			} else if check {
-				fmt.Fprintf(cmd.OutOrStdout(), "Device inventory would change: +%d ~%d -%d.\n", len(report.Added), len(report.Updated), len(report.Removed))
+				terminalWritef(cmd.OutOrStdout(), "Device inventory would change: +%d ~%d -%d.\n", len(report.Added), len(report.Updated), len(report.Removed))
 			} else {
-				fmt.Fprintf(cmd.OutOrStdout(), "Applied device inventory: +%d ~%d -%d.\n", len(report.Added), len(report.Updated), len(report.Removed))
+				terminalWritef(cmd.OutOrStdout(), "Applied device inventory: +%d ~%d -%d.\n", len(report.Added), len(report.Updated), len(report.Removed))
 			}
 			return nil
 		},

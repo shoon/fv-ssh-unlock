@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/shoon/fv-ssh-unlock/internal/securefs"
 )
 
 const maxCredentialFileSize = 4096
@@ -31,7 +33,13 @@ func (p *fileProvider) Get(reference string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("credential file unavailable: %w", err)
 	}
-	assessment := assessCredentialPath(path)
+	f, err := openStableCredentialFile(path)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+
+	assessment := assessCredentialHandle(path, f)
 	if !assessment.Available {
 		return "", fmt.Errorf("credential file unavailable: %s", assessment.Details)
 	}
@@ -39,12 +47,6 @@ func (p *fileProvider) Get(reference string) (string, error) {
 		return "", fmt.Errorf("%w: %s; use --allow-unsafe-credential-storage for this invocation only if plaintext disk storage is intentional",
 			ErrUnsafeCredentialStorage, assessment.Details)
 	}
-
-	f, err := openStableCredentialFile(path)
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = f.Close() }()
 
 	data, err := io.ReadAll(io.LimitReader(f, maxCredentialFileSize+1))
 	if err != nil {
@@ -150,7 +152,7 @@ func openStableCredentialFile(path string) (*os.File, error) {
 	if !filepath.IsAbs(clean) {
 		return nil, fmt.Errorf("credential file path must be absolute")
 	}
-	f, err := os.Open(clean)
+	f, err := securefs.OpenStable(clean, "credential file")
 	if err != nil {
 		return nil, fmt.Errorf("open credential file: %w", err)
 	}
@@ -162,11 +164,7 @@ func openStableCredentialFile(path string) (*os.File, error) {
 	if err != nil {
 		return fail(err)
 	}
-	pathInfo, err := os.Lstat(clean)
-	if err != nil {
-		return fail(err)
-	}
-	if !opened.Mode().IsRegular() || !pathInfo.Mode().IsRegular() || pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(opened, pathInfo) {
+	if !opened.Mode().IsRegular() {
 		return fail(fmt.Errorf("credential path is not a stable regular file: %s", clean))
 	}
 	if opened.Size() > maxCredentialFileSize {

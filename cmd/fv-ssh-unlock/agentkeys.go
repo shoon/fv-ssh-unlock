@@ -7,7 +7,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -122,27 +121,9 @@ func discoverDefaultIdentityFiles(home string) []string {
 }
 
 func readIdentityFile(path string) ([]byte, error) {
-	file, err := securefs.OpenStable(path, "identity file")
+	data, err := securefs.ReadPrivate(path, "identity", maxIdentityFileSize)
 	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = file.Close() }()
-	info, err := file.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if info.Size() > maxIdentityFileSize {
-		return nil, fmt.Errorf("identity exceeds %d bytes", maxIdentityFileSize)
-	}
-	if err := securefs.VerifyPrivateFile(file); err != nil {
-		return nil, fmt.Errorf("identity permissions are too open or owned by an untrusted account: %w", err)
-	}
-	data, err := io.ReadAll(io.LimitReader(file, maxIdentityFileSize+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(data) > maxIdentityFileSize {
-		return nil, fmt.Errorf("identity exceeds %d bytes", maxIdentityFileSize)
+		return nil, fmt.Errorf("read identity: %w", err)
 	}
 	return data, nil
 }

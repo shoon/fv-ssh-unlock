@@ -25,30 +25,12 @@ func (s *FileStore) Load() (PersistentState, error) {
 	if s == nil || s.Path == "" {
 		return PersistentState{}, errorsNewPath()
 	}
-	fh, err := securefs.OpenStable(s.Path, "monitor state")
+	content, err := securefs.ReadPrivate(s.Path, "monitor state", maxStateSize)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return PersistentState{Version: persistentStateVersion, Devices: map[string]DeviceRecord{}}, nil
 		}
 		return PersistentState{}, err
-	}
-	defer func() { _ = fh.Close() }()
-	info, err := fh.Stat()
-	if err != nil {
-		return PersistentState{}, err
-	}
-	if err := securefs.VerifyPrivateFile(fh); err != nil {
-		return PersistentState{}, fmt.Errorf("insecure monitor state file %s: %w", s.Path, err)
-	}
-	if info.Size() > maxStateSize {
-		return PersistentState{}, fmt.Errorf("monitor state exceeds %d bytes", maxStateSize)
-	}
-	content, err := io.ReadAll(io.LimitReader(fh, maxStateSize+1))
-	if err != nil {
-		return PersistentState{}, err
-	}
-	if len(content) > maxStateSize {
-		return PersistentState{}, fmt.Errorf("monitor state exceeds %d bytes", maxStateSize)
 	}
 	var state PersistentState
 	decoder := json.NewDecoder(bytes.NewReader(content))

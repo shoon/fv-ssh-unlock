@@ -217,8 +217,10 @@ func main() {
 			registry := credentials.NewRegistry(credentials.Options{AllowUnsafeCredentialStorage: allowUnsafeStorage})
 			credentialSource := credentials.ProviderRuntime
 			credentialRef := ""
-			var storedProvider credentials.Provider
-			storeInKeyring := func() error {
+			var keyringProvider credentials.Provider
+			var keyringPassword string
+			defer func() { keyringPassword = "" }()
+			prepareKeyring := func() error {
 				provider, err := registry.Provider(credentials.ProviderKeyring)
 				if err != nil {
 					return err
@@ -235,11 +237,9 @@ func main() {
 				if password == "" {
 					return fmt.Errorf("password must not be empty")
 				}
-				if err := provider.Store(cred, password); err != nil {
-					return fmt.Errorf("store password in keychain: %w", err)
-				}
 				credentialSource = credentials.ProviderKeyring
-				storedProvider = provider
+				keyringProvider = provider
+				keyringPassword = password
 				return nil
 			}
 
@@ -247,7 +247,7 @@ func main() {
 			case credentials.ProviderRuntime:
 				fmt.Printf("Password will be read from %s or prompted at unlock time.\n", terminalSafeInline(envName))
 			case credentials.ProviderKeyring:
-				if err := storeInKeyring(); err != nil {
+				if err := prepareKeyring(); err != nil {
 					return err
 				}
 			case credentials.ProviderFile:
@@ -284,7 +284,7 @@ func main() {
 						return fmt.Errorf("read confirmation: %w", err)
 					}
 					if confirmed {
-						if err := storeInKeyring(); err != nil {
+						if err := prepareKeyring(); err != nil {
 							return err
 						}
 					} else {
@@ -307,17 +307,18 @@ func main() {
 				AutoUnlock:       autoUnlock,
 			}
 			if err := config.ValidateDevice(d); err != nil {
-				if storedProvider != nil {
-					_ = storedProvider.Delete(cred)
-				}
 				return err
 			}
-			if err := s.Add(d); err != nil {
-				if storedProvider != nil {
-					if deleteErr := storedProvider.Delete(cred); deleteErr != nil {
-						return errors.Join(err, fmt.Errorf("roll back keychain credential: %w", deleteErr))
+			var prepareExternalState func() error
+			if keyringProvider != nil {
+				prepareExternalState = func() error {
+					if err := keyringProvider.Store(cred, keyringPassword); err != nil {
+						return fmt.Errorf("store password in keychain: %w", err)
 					}
+					return nil
 				}
+			}
+			if err := s.AddPrepared(d, prepareExternalState); err != nil {
 				return err
 			}
 			fmt.Printf("Added device %q.\n", terminalSafeInline(name))
@@ -669,7 +670,7 @@ func main() {
 				if jsonOutput {
 					return writeStatusJSON(cmd.OutOrStdout(), []statusReport{})
 				}
-				fmt.Fprintln(cmd.OutOrStdout(), "No configured devices to check.")
+				terminalWriteLine(cmd.OutOrStdout(), "No configured devices to check.")
 				return nil
 			}
 
@@ -1013,14 +1014,6 @@ type unlockAttemptResult struct {
 	lastError error
 }
 
-// unlockRetryClient is the SSH surface the retry state machine needs: the
-// password-carrying unlock path and the password-free verification probe. Real
-// clients satisfy both; tests substitute a fake.
-type unlockRetryClient interface {
-	fvcore.SSHClient
-	fvcore.StatusChecker
-}
-
 // unlockDeviceWithRetry runs the unlock retry state machine for a single
 // device.
 //
@@ -1033,7 +1026,7 @@ type unlockRetryClient interface {
 // attempt is credited only if a password-free probe independently proves the
 // device booted; otherwise the state machine keeps failing closed and, if
 // attempts remain, retries under the configured policy.
-func unlockDeviceWithRetry(ctx context.Context, out io.Writer, client unlockRetryClient, store fvcore.CredentialStore, device config.Device, credID string, opts unlockRetryOptions) (unlockAttemptResult, error) {
+func unlockDeviceWithRetry(ctx context.Context, out io.Writer, client daemonSSHClient, store fvcore.CredentialStore, device config.Device, credID string, opts unlockRetryOptions) (unlockAttemptResult, error) {
 	successMsg := device.SuccessMessage
 	if successMsg == "" {
 		successMsg = defaultSuccessMessage
@@ -1045,9 +1038,9 @@ func unlockDeviceWithRetry(ctx context.Context, out io.Writer, client unlockRetr
 		attempts++
 		hostWithPort := deviceEndpoint(device)
 		if opts.verbose {
-			fmt.Fprintf(out, "[verbose] Attempt %d/%d: Unlocking %s@%s, successMsg=%q\n", attempts, opts.maxAttempts, terminalSafeInline(device.User), terminalSafeInline(hostWithPort), terminalSafeInline(successMsg))
+			terminalWritef(out, "[verbose] Attempt %d/%d: Unlocking %s@%s, successMsg=%q\n", attempts, opts.maxAttempts, terminalSafeInline(device.User), terminalSafeInline(hostWithPort), terminalSafeInline(successMsg))
 		} else {
-			fmt.Fprintf(out, "Attempt %d/%d: Unlocking %s@%s\n", attempts, opts.maxAttempts, terminalSafeInline(device.User), terminalSafeInline(hostWithPort))
+			terminalWritef(out, "Attempt %d/%d: Unlocking %s@%s\n", attempts, opts.maxAttempts, terminalSafeInline(device.User), terminalSafeInline(hostWithPort))
 		}
 
 		fvDevice := fvcore.Device{
@@ -1069,17 +1062,17 @@ func unlockDeviceWithRetry(ctx context.Context, out io.Writer, client unlockRetr
 		}
 
 		if opts.verbose {
-			fmt.Fprintf(out, "[verbose] banner:\n%s\n", terminalSafeMultiline(res.Output))
+			terminalWritef(out, "[verbose] banner:\n%s\n", terminalSafeMultiline(res.Output))
 			if res.Error != nil {
-				fmt.Fprintf(out, "[verbose] Error: %s\n", terminalSafeInline(res.Error.Error()))
+				terminalWritef(out, "[verbose] Error: %s\n", terminalSafeInline(res.Error.Error()))
 			}
 		}
 
 		switch res.Status {
 		case fvcore.StatusUnlocked:
-			fmt.Fprintf(out, "SUCCESS: %s accepted the unlock password.\n", terminalSafeInline(device.Name))
+			terminalWritef(out, "SUCCESS: %s accepted the unlock password.\n", terminalSafeInline(device.Name))
 			if opts.verifyWindow > 0 {
-				fmt.Fprintf(out, "Verifying %s finished booting (up to %v)...\n", terminalSafeInline(device.Name), opts.verifyWindow)
+				terminalWritef(out, "Verifying %s finished booting (up to %v)...\n", terminalSafeInline(device.Name), opts.verifyWindow)
 				verifyOpts := fvcore.DefaultVerifyOptions()
 				verifyOpts.Window = opts.verifyWindow
 				ok, verr := fvcore.VerifyUnlock(ctx, client, fvDevice, verifyOpts)
@@ -1087,36 +1080,36 @@ func unlockDeviceWithRetry(ctx context.Context, out io.Writer, client unlockRetr
 				case errors.Is(verr, fvcore.ErrHostKeyMismatch):
 					return unlockAttemptResult{}, verr
 				case errors.Is(verr, fvcore.ErrIndeterminate):
-					fmt.Fprintf(out, "WARNING: %s accepted the unlock, but no public key proved that normal macOS returned; run status later with ssh-agent or --identity.\n", terminalSafeInline(device.Name))
+					terminalWritef(out, "WARNING: %s accepted the unlock, but no public key proved that normal macOS returned; run status later with ssh-agent or --identity.\n", terminalSafeInline(device.Name))
 				case verr != nil:
-					fmt.Fprintf(out, "WARNING: could not verify %s: %s\n", terminalSafeInline(device.Name), terminalSafeInline(verr.Error()))
+					terminalWritef(out, "WARNING: could not verify %s: %s\n", terminalSafeInline(device.Name), terminalSafeInline(verr.Error()))
 				case ok:
-					fmt.Fprintf(out, "VERIFIED: %s is booted and reachable over SSH.\n", terminalSafeInline(device.Name))
+					terminalWritef(out, "VERIFIED: %s is booted and reachable over SSH.\n", terminalSafeInline(device.Name))
 				default:
-					fmt.Fprintf(out, "NOTE: %s accepted the unlock but has not come back within %v; it may still be booting.\n", terminalSafeInline(device.Name), opts.verifyWindow)
+					terminalWritef(out, "NOTE: %s accepted the unlock but has not come back within %v; it may still be booting.\n", terminalSafeInline(device.Name), opts.verifyWindow)
 				}
 			}
 			return unlockAttemptResult{outcome: unlockOutcomeUnlocked}, nil
 		case fvcore.StatusUnlockedRecently:
 			if previousUnacknowledgedAttempt {
-				fmt.Fprintf(out, "VERIFIED: %s is booted after an earlier unlock attempt; the pre-boot success acknowledgement was not observed.\n", terminalSafeInline(device.Name))
+				terminalWritef(out, "VERIFIED: %s is booted after an earlier unlock attempt; the pre-boot success acknowledgement was not observed.\n", terminalSafeInline(device.Name))
 			} else {
-				fmt.Fprintf(out, "INFO: %s is already booted; normal macOS SSH accepted a public key. No unlock was needed.\n", terminalSafeInline(device.Name))
+				terminalWritef(out, "INFO: %s is already booted; normal macOS SSH accepted a public key. No unlock was needed.\n", terminalSafeInline(device.Name))
 			}
 			return unlockAttemptResult{outcome: unlockOutcomeUnlocked}, nil
 		case fvcore.StatusLocked:
 			// Wrong password; retrying will not help.
-			fmt.Fprintf(out, "FAILED: %s is still locked (incorrect password).\n", terminalSafeInline(device.Name))
+			terminalWritef(out, "FAILED: %s is still locked (incorrect password).\n", terminalSafeInline(device.Name))
 			return unlockAttemptResult{outcome: unlockOutcomeIncorrectPassword}, nil
 		default:
 			if errors.Is(res.Error, fvcore.ErrHostKeyMismatch) {
-				fmt.Fprintf(out, "SECURITY ERROR: refusing %s: %s\n", terminalSafeInline(device.Name), terminalSafeInline(res.Error.Error()))
+				terminalWritef(out, "SECURITY ERROR: refusing %s: %s\n", terminalSafeInline(device.Name), terminalSafeInline(res.Error.Error()))
 				return unlockAttemptResult{}, res.Error
 			}
 			if errors.Is(res.Error, fvcore.ErrUnlockOutcomeUnknown) {
 				previousUnacknowledgedAttempt = true
 				if opts.verifyWindow > 0 {
-					fmt.Fprintf(out, "The password was submitted, but %s did not acknowledge the outcome. Checking for normal macOS without sending the password again (up to %v)...\n", terminalSafeInline(device.Name), opts.verifyWindow)
+					terminalWritef(out, "The password was submitted, but %s did not acknowledge the outcome. Checking for normal macOS without sending the password again (up to %v)...\n", terminalSafeInline(device.Name), opts.verifyWindow)
 					verifyOpts := fvcore.DefaultVerifyOptions()
 					verifyOpts.Grace = 0
 					verifyOpts.Window = opts.verifyWindow
@@ -1130,16 +1123,16 @@ func unlockDeviceWithRetry(ctx context.Context, out io.Writer, client unlockRetr
 					case errors.Is(verr, fvcore.ErrHostKeyMismatch):
 						return unlockAttemptResult{}, verr
 					case ok:
-						fmt.Fprintf(out, "VERIFIED: %s is booted and reachable over SSH after the unlock attempt; the pre-boot success acknowledgement was not observed.\n", terminalSafeInline(device.Name))
+						terminalWritef(out, "VERIFIED: %s is booted and reachable over SSH after the unlock attempt; the pre-boot success acknowledgement was not observed.\n", terminalSafeInline(device.Name))
 					case errors.Is(verr, fvcore.ErrIndeterminate):
-						fmt.Fprintf(out, "NOTE: %s is still reachable but its state cannot yet be proved without a public key; continuing the configured retry policy.\n", terminalSafeInline(device.Name))
+						terminalWritef(out, "NOTE: %s is still reachable but its state cannot yet be proved without a public key; continuing the configured retry policy.\n", terminalSafeInline(device.Name))
 					case verr != nil:
 						if errors.Is(verr, context.Canceled) {
 							return unlockAttemptResult{}, verr
 						}
-						fmt.Fprintf(out, "NOTE: boot verification after the unacknowledged attempt failed: %s\n", terminalSafeInline(verr.Error()))
+						terminalWritef(out, "NOTE: boot verification after the unacknowledged attempt failed: %s\n", terminalSafeInline(verr.Error()))
 					default:
-						fmt.Fprintf(out, "NOTE: %s did not return to normal SSH within %v; continuing the configured retry policy.\n", terminalSafeInline(device.Name), opts.verifyWindow)
+						terminalWritef(out, "NOTE: %s did not return to normal SSH within %v; continuing the configured retry policy.\n", terminalSafeInline(device.Name), opts.verifyWindow)
 					}
 					if ok {
 						return unlockAttemptResult{outcome: unlockOutcomeUnlocked}, nil
@@ -1149,12 +1142,12 @@ func unlockDeviceWithRetry(ctx context.Context, out io.Writer, client unlockRetr
 			// StatusUnknown: transient (network not up yet, dial
 			// error). These are the cases worth retrying.
 			if res.Error != nil {
-				fmt.Fprintf(out, "Attempt %d/%d failed: %s\n", attempts, opts.maxAttempts, terminalSafeInline(res.Error.Error()))
+				terminalWritef(out, "Attempt %d/%d failed: %s\n", attempts, opts.maxAttempts, terminalSafeInline(res.Error.Error()))
 			} else {
-				fmt.Fprintf(out, "Attempt %d/%d failed: device state unknown\n", attempts, opts.maxAttempts)
+				terminalWritef(out, "Attempt %d/%d failed: device state unknown\n", attempts, opts.maxAttempts)
 			}
 			if attempts < opts.maxAttempts {
-				fmt.Fprintf(out, "Waiting %v before next attempt...\n", opts.retryDelay)
+				terminalWritef(out, "Waiting %v before next attempt...\n", opts.retryDelay)
 				select {
 				case <-ctx.Done():
 					return unlockAttemptResult{}, ctx.Err()
@@ -1162,7 +1155,7 @@ func unlockDeviceWithRetry(ctx context.Context, out io.Writer, client unlockRetr
 				}
 				continue
 			}
-			fmt.Fprintf(out, "Error: reached max retry attempts for device '%s'. Giving up.\n", terminalSafeInline(device.Name))
+			terminalWritef(out, "Error: reached max retry attempts for device '%s'. Giving up.\n", terminalSafeInline(device.Name))
 			return unlockAttemptResult{outcome: unlockOutcomeExhausted, lastError: res.Error}, nil
 		}
 	}

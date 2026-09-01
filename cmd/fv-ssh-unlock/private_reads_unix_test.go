@@ -6,16 +6,12 @@ package main
 
 import (
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
 
 func TestLoadPinnedTargetNamesRejectsInsecureKnownHosts(t *testing.T) {
-	directory := filepath.Join(t.TempDir(), "private")
-	if err := os.Mkdir(directory, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	directory := privateDaemonTestDir(t)
 	previous := dataDirOverride
 	dataDirOverride = directory
 	t.Cleanup(func() { dataDirOverride = previous })

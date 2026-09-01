@@ -22,14 +22,30 @@ const (
 	ramfsMagic uint32 = 0x858458f6
 )
 
-func platformSecureCredentialFile(path string, _ os.FileInfo) (bool, string) {
+func platformSecureCredentialFile(path string, file *os.File, _ os.FileInfo) (bool, string) {
 	if pathWithin("/run/secrets", path) {
-		if memoryBackedFilesystem(path) {
+		if secure, _ := platformMemoryBackedCredentialFile(file); secure {
 			return true, "file is in a memory-backed /run/secrets mount"
 		}
 		return false, ""
 	}
 	return false, ""
+}
+
+func platformMemoryBackedCredentialFile(file *os.File) (bool, string) {
+	if file == nil {
+		return false, ""
+	}
+	var stat unix.Statfs_t
+	if err := unix.Fstatfs(int(file.Fd()), &stat); err != nil {
+		return false, ""
+	}
+	// #nosec G115 -- deliberate truncation: magics are 32-bit kernel values, see the constant block.
+	memoryBacked := uint32(stat.Type) == tmpfsMagic || uint32(stat.Type) == ramfsMagic
+	if !memoryBacked {
+		return false, ""
+	}
+	return true, "opened credential file is on a memory-backed filesystem"
 }
 
 func platformSecureCredentialDirectory(path string) (bool, string) {

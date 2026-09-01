@@ -104,15 +104,13 @@ type ConfiguredFingerprint struct {
 }
 
 // IngestResult reports the candidate produced by an observation. EvictedIDs
-// identifies unreviewed candidates displaced to make room. Dropped marks an
-// observation that matched no existing candidate and could not create one
-// because the inbox was full of operator-reviewed entries; Candidate is then
-// zero, DroppedObservation identifies the rejected host, and the rest of the
-// round is still applied.
+// identifies unreviewed candidates displaced to make room. A non-nil
+// DroppedObservation marks a host that matched no existing candidate and could
+// not create one because the inbox was full of operator-reviewed entries;
+// Candidate is then zero and the rest of the round is still applied.
 type IngestResult struct {
 	Candidate          Candidate    `json:"candidate"`
 	Created            bool         `json:"created"`
-	Dropped            bool         `json:"dropped,omitempty"`
 	DroppedObservation *Observation `json:"dropped_observation,omitempty"`
 	EvictedIDs         []string     `json:"evicted_ids,omitempty"`
 	MergedIDs          []string     `json:"merged_ids,omitempty"`

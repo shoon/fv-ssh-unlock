@@ -8,7 +8,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/netip"
 	"os"
@@ -415,30 +414,12 @@ func loadPinnedTargetNames() (map[string][]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	file, err := securefs.OpenStable(path, "known_hosts")
+	data, err := securefs.ReadPrivate(path, "known_hosts", maxKnownHostsSize)
 	if os.IsNotExist(err) {
 		return map[string][]string{}, nil
 	}
 	if err != nil {
 		return nil, err
-	}
-	defer func() { _ = file.Close() }()
-	info, err := file.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if info.Size() > maxKnownHostsSize {
-		return nil, fmt.Errorf("known_hosts exceeds %d bytes", maxKnownHostsSize)
-	}
-	if err := securefs.VerifyPrivateFile(file); err != nil {
-		return nil, fmt.Errorf("insecure known_hosts file %s: %w", path, err)
-	}
-	data, err := io.ReadAll(io.LimitReader(file, maxKnownHostsSize+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(data) > maxKnownHostsSize {
-		return nil, fmt.Errorf("known_hosts exceeds %d bytes", maxKnownHostsSize)
 	}
 	return matchPinnedTargetNames(data, devices), nil
 }

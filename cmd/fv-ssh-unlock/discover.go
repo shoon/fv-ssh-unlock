@@ -449,10 +449,3 @@ func sortAddrs(addrs []string) {
 		return addrs[i] < addrs[j]
 	})
 }
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}

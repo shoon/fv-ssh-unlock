@@ -7,6 +7,7 @@ package securefs
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -47,6 +48,38 @@ func OpenStable(path, purpose string) (*os.File, error) {
 // re-applies mode 0600 to the opened descriptor.
 func OpenPrivate(path, purpose string, flags int) (*os.File, error) {
 	return openChecked(path, purpose, flags, true)
+}
+
+// ReadPrivate reads a bounded private regular file through the descriptor that
+// OpenStable validated. Callers get one consistent ordering for symlink,
+// ownership, permission, size, and short-read checks.
+func ReadPrivate(path, purpose string, maximum int64) ([]byte, error) {
+	if maximum < 0 {
+		return nil, fmt.Errorf("%s maximum size must not be negative", purpose)
+	}
+	file, err := OpenStable(path, purpose)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if info.Size() > maximum {
+		return nil, fmt.Errorf("%s exceeds %d bytes", purpose, maximum)
+	}
+	if err := VerifyPrivateFile(file); err != nil {
+		return nil, fmt.Errorf("insecure %s file %s: %w", purpose, path, err)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maximum+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maximum {
+		return nil, fmt.Errorf("%s exceeds %d bytes", purpose, maximum)
+	}
+	return data, nil
 }
 
 func openChecked(path, purpose string, flags int, repairMode bool) (*os.File, error) {

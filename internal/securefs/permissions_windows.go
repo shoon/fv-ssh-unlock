@@ -26,6 +26,9 @@ func verifyPrivateFile(file *os.File) error {
 }
 
 func securePrivateFile(file *os.File) error {
+	if err := verifyWindowsACL(file, false); err == nil {
+		return nil
+	}
 	if err := setPrivateWindowsACL(file, false); err != nil {
 		return err
 	}

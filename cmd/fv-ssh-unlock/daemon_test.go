@@ -227,6 +227,25 @@ func TestCandidateLogEscapesUntrustedLineBreaks(t *testing.T) {
 	}
 }
 
+func TestDaemonLoggerSanitizesUnwrappedStringAndErrorAttributes(t *testing.T) {
+	var output bytes.Buffer
+	logger := newDaemonLogger(&output, daemonOptions{logFormat: "json", logLevel: slog.LevelInfo})
+	logger.Info("test record", "host", "mac\r\nlevel=ERROR", "error", errors.New("failed\nevent=forged"))
+	if got := bytes.Count(output.Bytes(), []byte{'\n'}); got != 1 {
+		t.Fatalf("logger emitted %d physical records, want 1: %q", got, output.String())
+	}
+	var entry map[string]any
+	if err := json.Unmarshal(output.Bytes(), &entry); err != nil {
+		t.Fatal(err)
+	}
+	if entry["host"] != `mac\u000D\u000Alevel=ERROR` {
+		t.Fatalf("host attribute was not sanitized: %#v", entry["host"])
+	}
+	if entry["error"] != `failed\u000Aevent=forged` {
+		t.Fatalf("error attribute was not sanitized: %#v", entry["error"])
+	}
+}
+
 func TestCandidateCapacityLogsDropsAndEvictions(t *testing.T) {
 	observedAt := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
 	var output bytes.Buffer
@@ -240,7 +259,6 @@ func TestCandidateCapacityLogsDropsAndEvictions(t *testing.T) {
 			},
 		},
 		{
-			Dropped: true,
 			DroppedObservation: &candidates.Observation{
 				Source: "active-scan", ObservedAt: observedAt, Address: "192.0.2.44", Port: 22,
 				Hostname: "new-mac.local", Fingerprint: "SHA256:test",
@@ -372,7 +390,7 @@ func osWritePrivateForTest(path, value string) error {
 }
 
 func TestDaemonLockExcludesConcurrentController(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "daemon.lock")
+	path := filepath.Join(privateDaemonTestDir(t), "daemon.lock")
 	first, err := acquireDaemonLock(path)
 	if err != nil {
 		t.Fatalf("first lock: %v", err)
@@ -538,7 +556,7 @@ func TestCandidateAPISurfacesCapacityCounters(t *testing.T) {
 	if _, err := inbox.MarkVerified(result.Candidate.ID); err != nil {
 		t.Fatal(err)
 	}
-	if dropped, err := inbox.Ingest(candidates.Observation{Source: "test", Address: "192.0.2.2", Port: 22}); err != nil || !dropped.Dropped {
+	if dropped, err := inbox.Ingest(candidates.Observation{Source: "test", Address: "192.0.2.2", Port: 22}); err != nil || dropped.DroppedObservation == nil {
 		t.Fatalf("capacity observation: result=%+v err=%v", dropped, err)
 	}
 
@@ -655,34 +673,6 @@ func privateDaemonTestDir(t *testing.T) string {
 	return directory
 }
 
-func TestRemainingTimeoutHonoursTheConfiguredBudget(t *testing.T) {
-	if got := remainingTimeout(context.Background(), 60*time.Second); got != 60*time.Second {
-		t.Fatalf("deadline-free budget = %v, want 60s", got)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
-	defer cancel()
-	if got := remainingTimeout(ctx, 60*time.Second); got != 60*time.Second {
-		t.Fatalf("distant deadline shortened the budget to %v, want 60s", got)
-	}
-
-	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	got := remainingTimeout(ctx, 60*time.Second)
-	if got <= 0 || got > 5*time.Second {
-		t.Fatalf("near deadline budget = %v, want (0, 5s]", got)
-	}
-
-	ctx, cancel = context.WithTimeout(context.Background(), time.Nanosecond)
-	defer cancel()
-	<-ctx.Done()
-	// An expired context must not lengthen or zero the budget; the operation
-	// fails on the context instead of on a degenerate timeout.
-	if got := remainingTimeout(ctx, 60*time.Second); got != 60*time.Second {
-		t.Fatalf("expired-context budget = %v, want 60s", got)
-	}
-}
-
 // timeoutRecordingSSH records the deadline each operation is given, so the
 // budget actually applied to an SSH call can be asserted.
 type timeoutRecordingSSH struct {
@@ -752,7 +742,7 @@ func TestDaemonTimeoutFlagsReachTheAdapterAndDialer(t *testing.T) {
 
 	// This mirrors how runDaemon wires the options, so a regression that drops
 	// the configured budget on the way to the SSH layer is caught here.
-	dialTimeout := maxDuration(opts.probeTimeout, opts.unlockTimeout)
+	dialTimeout := max(opts.probeTimeout, opts.unlockTimeout)
 	if dialTimeout != 90*time.Second {
 		t.Fatalf("dial timeout = %v, want the longer configured budget", dialTimeout)
 	}
@@ -774,21 +764,6 @@ func TestDaemonTimeoutFlagsReachTheAdapterAndDialer(t *testing.T) {
 	}
 	if fallback.DialTimeout != defaultDialTimeout {
 		t.Fatalf("fallback dial timeout = %v, want %v", fallback.DialTimeout, defaultDialTimeout)
-	}
-}
-
-func TestDaemonSharedDialTimeoutDoesNotCapEitherOperation(t *testing.T) {
-	for _, test := range []struct {
-		probe  time.Duration
-		unlock time.Duration
-		want   time.Duration
-	}{
-		{probe: time.Second, unlock: time.Minute, want: time.Minute},
-		{probe: time.Minute, unlock: time.Second, want: time.Minute},
-	} {
-		if got := maxDuration(test.probe, test.unlock); got != test.want {
-			t.Fatalf("maxDuration(%v, %v) = %v, want %v", test.probe, test.unlock, got, test.want)
-		}
 	}
 }
 
@@ -954,6 +929,31 @@ func TestEnrollmentPinsTheHostKeyOnlyOnSuccess(t *testing.T) {
 	}
 }
 
+func TestEnrollmentRollbackPreservesAConcurrentReplacement(t *testing.T) {
+	store := &config.Store{Path: filepath.Join(privateDaemonTestDir(t), "devices.json")}
+	original := config.Device{Name: "new-mac", Host: "192.0.2.1", User: "user", Port: 22, Cred: credentials.ID("new-mac"), CredentialSource: credentials.ProviderRuntime}
+	if err := store.Add(original); err != nil {
+		t.Fatal(err)
+	}
+	replacement := original
+	replacement.Host = "192.0.2.2"
+	if err := store.Update(replacement); err != nil {
+		t.Fatal(err)
+	}
+	adapter := newDaemonAdapter(&fakeDaemonSSH{}, []config.Device{original}, defaultProbeTimeout, defaultUnlockTimeout)
+	api := &daemonAPI{store: store, adapter: adapter, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	if err := api.rollbackEnrollment(original, pendingHostKey{}); !errors.Is(err, config.ErrDeviceChanged) {
+		t.Fatalf("rollback error = %v, want ErrDeviceChanged", err)
+	}
+	devices, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(devices) != 1 || devices[0] != replacement {
+		t.Fatalf("rollback removed concurrent replacement: %+v", devices)
+	}
+}
+
 func TestEnrollmentProbeDoesNotHoldTheMutationLock(t *testing.T) {
 	dataDir := privateDaemonTestDir(t)
 	oldDataDir := dataDirOverride
@@ -1003,7 +1003,7 @@ func TestEnrollmentProbeDoesNotHoldTheMutationLock(t *testing.T) {
 		engine: engine, inbox: inbox,
 		store:        &config.Store{Path: filepath.Join(dataDir, "devices.json")},
 		adapter:      newDaemonAdapter(&fakeDaemonSSH{}, nil, defaultProbeTimeout, defaultUnlockTimeout),
-		probeTimeout: 3 * time.Second, dialTimeout: 3 * time.Second,
+		probeTimeout: 3 * time.Second, unlockTimeout: 3 * time.Second,
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 	handler := api.routes()
@@ -1081,6 +1081,47 @@ func TestEnrollmentProbeDoesNotHoldTheMutationLock(t *testing.T) {
 type syncWriter struct {
 	mu     sync.Mutex
 	buffer bytes.Buffer
+}
+
+func TestTrackedHandlerJoinsActiveRequestsAndRejectsNewOnes(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	handler := newTrackedHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(started)
+		<-release
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	requestDone := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+		close(requestDone)
+	}()
+	<-started
+	handler.StopAccepting()
+
+	waited := make(chan struct{})
+	go func() {
+		handler.Wait()
+		close(waited)
+	}()
+	select {
+	case <-waited:
+		t.Fatal("Wait returned before the active request finished")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	rejected := httptest.NewRecorder()
+	handler.ServeHTTP(rejected, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rejected.Code != http.StatusServiceUnavailable {
+		t.Fatalf("request after shutdown admission = %d, want %d", rejected.Code, http.StatusServiceUnavailable)
+	}
+	close(release)
+	select {
+	case <-waited:
+	case <-time.After(time.Second):
+		t.Fatal("Wait did not join the completed request")
+	}
+	<-requestDone
 }
 
 func (w *syncWriter) Write(p []byte) (int, error) {

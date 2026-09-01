@@ -5,6 +5,8 @@
 package config
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,9 +14,12 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/shoon/fv-ssh-unlock/internal/credentials"
+	"github.com/shoon/fv-ssh-unlock/internal/securefs"
 )
 
 func TestConfigAddRemoveList(t *testing.T) {
@@ -194,6 +199,98 @@ func TestAddDuplicate(t *testing.T) {
 	}
 }
 
+func TestAddPreparedRunsOnlyForTheWinningConcurrentAdd(t *testing.T) {
+	path := filepath.Join(privateConfigTestDir(t), "devices.json")
+	device := Device{Name: "shared", Host: "192.0.2.1", User: "user", Port: 22, Cred: credentials.ID("shared")}
+	stores := []*Store{{Path: path}, {Path: path}}
+	start := make(chan struct{})
+	errs := make(chan error, len(stores))
+	var preparations atomic.Int32
+	for _, store := range stores {
+		go func() {
+			<-start
+			errs <- store.AddPrepared(device, func() error {
+				preparations.Add(1)
+				time.Sleep(25 * time.Millisecond)
+				return nil
+			})
+		}()
+	}
+	close(start)
+
+	succeeded, failed := 0, 0
+	for range stores {
+		if err := <-errs; err != nil {
+			failed++
+		} else {
+			succeeded++
+		}
+	}
+	if succeeded != 1 || failed != 1 {
+		t.Fatalf("concurrent adds succeeded=%d failed=%d, want one of each", succeeded, failed)
+	}
+	if got := preparations.Load(); got != 1 {
+		t.Fatalf("external state prepared %d times, want once", got)
+	}
+	devices, err := stores[0].Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(devices) != 1 || devices[0] != device {
+		t.Fatalf("stored devices = %+v, want only %+v", devices, device)
+	}
+}
+
+func TestAddPreparedFailureLeavesConfigurationUnchanged(t *testing.T) {
+	store := &Store{Path: filepath.Join(privateConfigTestDir(t), "devices.json")}
+	wantErr := errors.New("keyring unavailable")
+	device := Device{Name: "mac", Host: "192.0.2.1", User: "user", Port: 22, Cred: credentials.ID("mac")}
+	err := store.AddPrepared(device, func() error { return wantErr })
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("AddPrepared() error = %v, want %v", err, wantErr)
+	}
+	devices, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(devices) != 0 {
+		t.Fatalf("failed preparation stored devices: %+v", devices)
+	}
+}
+
+func TestAddPreparedValidatesBeforePreparingExternalState(t *testing.T) {
+	store := &Store{Path: filepath.Join(privateConfigTestDir(t), "devices.json")}
+	prepared := false
+	invalid := Device{Name: "mac", Host: "192.0.2.1", User: "user", Port: 22, Cred: "wrong-id"}
+	if err := store.AddPrepared(invalid, func() error {
+		prepared = true
+		return nil
+	}); err == nil {
+		t.Fatal("invalid device was accepted")
+	}
+	if prepared {
+		t.Fatal("external state was prepared before validation")
+	}
+}
+
+func TestAddContextCancelsWhileWaitingForAnotherProcessLock(t *testing.T) {
+	if runtime.GOOS != "windows" && runtime.GOOS != "linux" && runtime.GOOS != "darwin" && runtime.GOOS != "freebsd" && runtime.GOOS != "openbsd" && runtime.GOOS != "netbsd" && runtime.GOOS != "dragonfly" && runtime.GOOS != "aix" && runtime.GOOS != "solaris" {
+		t.Skip("platform does not provide a cross-process file lock")
+	}
+	store := &Store{Path: filepath.Join(privateConfigTestDir(t), "devices.json")}
+	lock, err := securefs.AcquireLock(store.lockPath(), "configuration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Release()
+	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
+	defer cancel()
+	device := Device{Name: "mac", Host: "192.0.2.1", User: "user", Port: 22, Cred: credentials.ID("mac")}
+	if err := store.AddContext(ctx, device); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("AddContext() error = %v, want context deadline exceeded", err)
+	}
+}
+
 func TestConcurrentAddsDoNotLoseDevices(t *testing.T) {
 	store := &Store{Path: filepath.Join(privateConfigTestDir(t), "devices.json")}
 	const count = 16
@@ -260,6 +357,35 @@ func TestRemoveNotFound(t *testing.T) {
 	// attempt to remove missing device
 	if err := s.Remove("nope"); err == nil {
 		t.Fatalf("expected error when removing non-existent device, got nil")
+	}
+}
+
+func TestRemoveIfUnchangedPreservesAReplacement(t *testing.T) {
+	store := &Store{Path: filepath.Join(privateConfigTestDir(t), "devices.json")}
+	original := Device{Name: "mac", Host: "192.0.2.1", User: "user", Port: 22, Cred: credentials.ID("mac")}
+	if err := store.Add(original); err != nil {
+		t.Fatal(err)
+	}
+	replacement := original
+	replacement.Host = "192.0.2.2"
+	if err := store.Update(replacement); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RemoveIfUnchangedContext(context.Background(), original); !errors.Is(err, ErrDeviceChanged) {
+		t.Fatalf("conditional remove error = %v, want ErrDeviceChanged", err)
+	}
+	devices, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(devices) != 1 || devices[0] != replacement {
+		t.Fatalf("conditional rollback removed replacement: %+v", devices)
+	}
+	if err := store.RemoveIfUnchangedContext(context.Background(), replacement); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RemoveIfUnchangedContext(context.Background(), replacement); err != nil {
+		t.Fatalf("idempotent conditional remove = %v", err)
 	}
 }
 

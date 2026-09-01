@@ -6,7 +6,9 @@ package config
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -21,6 +23,12 @@ import (
 )
 
 const maxConfigSize = 1 << 20
+
+// ErrDeviceChanged means a conditional rollback found that another writer had
+// already replaced the device. The replacement is preserved.
+var ErrDeviceChanged = errors.New("device changed since it was added")
+
+var errNoMutation = errors.New("configuration mutation is already satisfied")
 
 // Device represents a configured target device.
 type Device struct {
@@ -52,10 +60,10 @@ func (s *Store) lockPath() string { return s.Path + ".lock" }
 // mutate serializes a read-modify-write of the store against every other
 // process, re-reading the file under the lock so a concurrent writer's device
 // is never overwritten from a stale in-memory copy.
-func (s *Store) mutate(apply func([]Device) ([]Device, error)) error {
+func (s *Store) mutate(ctx context.Context, apply func([]Device) ([]Device, error), prepare func() error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	lock, err := securefs.AcquireLock(s.lockPath(), "configuration")
+	lock, err := securefs.AcquireLockContext(ctx, s.lockPath(), "configuration")
 	if err != nil {
 		return err
 	}
@@ -66,37 +74,39 @@ func (s *Store) mutate(apply func([]Device) ([]Device, error)) error {
 	}
 	next, err := apply(devs)
 	if err != nil {
+		if errors.Is(err, errNoMutation) {
+			return nil
+		}
 		return err
 	}
-	return s.save(next)
+	// Validate before preparing external state. In particular, a keyring write
+	// must not happen until duplicate names and credential-environment
+	// collisions have been checked while the cross-process lock is held.
+	if err := validateDevices(next); err != nil {
+		return err
+	}
+	if prepare != nil {
+		if err := prepare(); err != nil {
+			return err
+		}
+	}
+	if err := s.save(next); err != nil {
+		if prepare != nil {
+			return fmt.Errorf("save configuration after preparing external state; prepared state was retained for safety: %w", err)
+		}
+		return err
+	}
+	return nil
 }
 
 // Load returns the list of devices from the store file.
 func (s *Store) Load() ([]Device, error) {
-	fh, err := securefs.OpenStable(s.Path, "configuration")
+	f, err := securefs.ReadPrivate(s.Path, "configuration", maxConfigSize)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
 		return nil, err
-	}
-	defer func() { _ = fh.Close() }()
-	info, err := fh.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if info.Size() > maxConfigSize {
-		return nil, fmt.Errorf("configuration exceeds %d bytes", maxConfigSize)
-	}
-	if err := securefs.VerifyPrivateFile(fh); err != nil {
-		return nil, fmt.Errorf("insecure configuration file %s: %w", s.Path, err)
-	}
-	f, err := io.ReadAll(io.LimitReader(fh, maxConfigSize+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(f) > maxConfigSize {
-		return nil, fmt.Errorf("configuration exceeds %d bytes", maxConfigSize)
 	}
 	var devs []Device
 	decoder := json.NewDecoder(bytes.NewReader(f))
@@ -144,7 +154,25 @@ func (s *Store) save(devs []Device) error {
 
 // Add adds a device to the store.
 func (s *Store) Add(d Device) error {
-	return s.mutate(func(devs []Device) ([]Device, error) {
+	return s.AddContext(context.Background(), d)
+}
+
+// AddContext adds a device and permits cancellation while waiting for another
+// process to finish a configuration transaction.
+func (s *Store) AddContext(ctx context.Context, d Device) error {
+	return s.addPrepared(ctx, d, nil)
+}
+
+// AddPrepared adds a device and runs prepare only after validation and the
+// duplicate check succeed under the cross-process configuration lock. It is
+// intended for external state, such as storing a keyring credential, that must
+// never be overwritten by a losing concurrent add.
+func (s *Store) AddPrepared(d Device, prepare func() error) error {
+	return s.addPrepared(context.Background(), d, prepare)
+}
+
+func (s *Store) addPrepared(ctx context.Context, d Device, prepare func() error) error {
+	return s.mutate(ctx, func(devs []Device) ([]Device, error) {
 		// prevent duplicate device names
 		for _, ex := range devs {
 			if ex.Name == d.Name {
@@ -152,7 +180,7 @@ func (s *Store) Add(d Device) error {
 			}
 		}
 		return append(devs, d), nil
-	})
+	}, prepare)
 }
 
 // Update replaces an existing device with the same name.
@@ -160,7 +188,7 @@ func (s *Store) Update(d Device) error {
 	if err := ValidateDevice(d); err != nil {
 		return err
 	}
-	return s.mutate(func(devs []Device) ([]Device, error) {
+	return s.mutate(context.Background(), func(devs []Device) ([]Device, error) {
 		for i := range devs {
 			if devs[i].Name == d.Name {
 				devs[i] = d
@@ -168,12 +196,12 @@ func (s *Store) Update(d Device) error {
 			}
 		}
 		return nil, fmt.Errorf("device not found: %s", d.Name)
-	})
+	}, nil)
 }
 
 // Remove deletes a device by name.
 func (s *Store) Remove(name string) error {
-	return s.mutate(func(devs []Device) ([]Device, error) {
+	return s.mutate(context.Background(), func(devs []Device) ([]Device, error) {
 		out := make([]Device, 0, len(devs))
 		found := false
 		for _, d := range devs {
@@ -187,7 +215,27 @@ func (s *Store) Remove(name string) error {
 			return nil, fmt.Errorf("device not found: %s", name)
 		}
 		return out, nil
-	})
+	}, nil)
+}
+
+// RemoveIfUnchangedContext removes expected only if the current entry is
+// byte-for-byte identical. It makes rollback safe when another process can
+// replace the same device name between the original add and cleanup. A missing
+// entry is already rolled back and succeeds; a replacement is preserved and
+// reported as ErrDeviceChanged.
+func (s *Store) RemoveIfUnchangedContext(ctx context.Context, expected Device) error {
+	return s.mutate(ctx, func(devs []Device) ([]Device, error) {
+		for i, device := range devs {
+			if device.Name != expected.Name {
+				continue
+			}
+			if device != expected {
+				return nil, fmt.Errorf("%w: %s", ErrDeviceChanged, expected.Name)
+			}
+			return append(devs[:i:i], devs[i+1:]...), nil
+		}
+		return nil, errNoMutation
+	}, nil)
 }
 
 // ValidateDevice rejects values that could redirect a credential to an

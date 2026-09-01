@@ -101,14 +101,14 @@ func fetchDashboard(ctx context.Context, client *http.Client) (dashboardSnapshot
 	if err := control.GetJSON(requestCtx, client, "/v1/devices", &snapshot.Devices); err != nil {
 		return snapshot, err
 	}
-	if snapshot.Devices.SchemaVersion != controlAPISchemaVersion {
-		return snapshot, fmt.Errorf("unsupported daemon API schema %d", snapshot.Devices.SchemaVersion)
+	if err := checkControlSchema(snapshot.Devices.SchemaVersion); err != nil {
+		return snapshot, err
 	}
 	if err := control.GetJSON(requestCtx, client, "/v1/candidates", &snapshot.Candidates); err != nil {
 		return snapshot, err
 	}
-	if snapshot.Candidates.SchemaVersion != controlAPISchemaVersion {
-		return snapshot, fmt.Errorf("unsupported daemon API schema %d", snapshot.Candidates.SchemaVersion)
+	if err := checkControlSchema(snapshot.Candidates.SchemaVersion); err != nil {
+		return snapshot, err
 	}
 	return snapshot, nil
 }
@@ -124,8 +124,8 @@ func runInteractiveTUI(ctx context.Context, input io.Reader, output io.Writer, c
 		return err
 	}
 	defer func() { _ = term.Restore(int(inFile.Fd()), oldState) }()
-	defer fmt.Fprint(output, "\x1b[?25h\x1b[0m\r\n")
-	fmt.Fprint(output, "\x1b[?25l")
+	defer terminalWrite(output, "\x1b[?25h\x1b[0m\r\n")
+	terminalWrite(output, "\x1b[?25l")
 
 	keys := make(chan byte, 32)
 	readErrors := make(chan error, 1)
@@ -197,12 +197,12 @@ func readTerminalKeys(input *os.File, keys chan<- byte, errs chan<- error) {
 
 func renderDashboard(output io.Writer, snapshot dashboardSnapshot, clear bool, message string) error {
 	if clear {
-		fmt.Fprint(output, "\x1b[H\x1b[2J")
+		terminalWrite(output, "\x1b[H\x1b[2J")
 	}
-	fmt.Fprintf(output, "fv-ssh-unlock  %d managed Mac(s)  %d candidate(s)  %s\n\n",
+	terminalWritef(output, "fv-ssh-unlock  %d managed Mac(s)  %d candidate(s)  %s\n\n",
 		len(snapshot.Devices.Devices), len(snapshot.Candidates.Candidates), time.Now().Format("15:04:05"))
 	tw := tabwriter.NewWriter(output, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "#\tHOST\tSTATE\tLAST CHECK\tAUTO\tNEXT ACTION")
+	terminalWriteLine(tw, "#\tHOST\tSTATE\tLAST CHECK\tAUTO\tNEXT ACTION")
 	for index, device := range snapshot.Devices.Devices {
 		auto := "no"
 		if device.AutoUnlock {
@@ -212,47 +212,47 @@ func renderDashboard(output io.Writer, snapshot dashboardSnapshot, clear bool, m
 		if !device.NextCheckAt.IsZero() {
 			next = relativeTime(device.NextCheckAt)
 		}
-		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\n", index+1, terminalSafeInline(device.Name), terminalSafeInline(string(device.State)),
+		terminalWritef(tw, "%d\t%s\t%s\t%s\t%s\t%s\n", index+1, terminalSafeInline(device.Name), terminalSafeInline(string(device.State)),
 			relativeTime(device.LastCheckedAt), auto, next)
 	}
 	if len(snapshot.Devices.Devices) == 0 {
-		fmt.Fprintln(tw, "-\t(no configured devices)\t-\t-\t-\t-")
+		terminalWriteLine(tw, "-\t(no configured devices)\t-\t-\t-\t-")
 	}
 	if err := tw.Flush(); err != nil {
 		return err
 	}
 
-	fmt.Fprintln(output, "\nCandidate inbox")
+	terminalWriteLine(output, "\nCandidate inbox")
 	tw = tabwriter.NewWriter(output, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "#\tADDRESS / NAME\tSTATE\tFINGERPRINT\tSEEN")
+	terminalWriteLine(tw, "#\tADDRESS / NAME\tSTATE\tFINGERPRINT\tSEEN")
 	for index, candidate := range snapshot.Candidates.Candidates {
 		location := candidateLocation(candidate)
 		fingerprint := candidate.Fingerprint
 		if fingerprint == "" {
 			fingerprint = "pending active scan"
 		}
-		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\n", index+1, terminalSafeInline(location), terminalSafeInline(string(candidate.State)),
+		terminalWritef(tw, "%d\t%s\t%s\t%s\t%s\n", index+1, terminalSafeInline(location), terminalSafeInline(string(candidate.State)),
 			terminalSafeInline(shortFingerprint(fingerprint)), relativeTime(candidate.LastSeen))
 	}
 	if len(snapshot.Candidates.Candidates) == 0 {
-		fmt.Fprintln(tw, "-\t(no candidates discovered)\t-\t-\t-")
+		terminalWriteLine(tw, "-\t(no candidates discovered)\t-\t-\t-")
 	}
 	if err := tw.Flush(); err != nil {
 		return err
 	}
 
 	if len(snapshot.Devices.Events) > 0 {
-		fmt.Fprintln(output, "\nRecent events")
+		terminalWriteLine(output, "\nRecent events")
 		start := max(0, len(snapshot.Devices.Events)-6)
 		for _, event := range snapshot.Devices.Events[start:] {
-			fmt.Fprintf(output, "%s  %-16s %-16s %s\n", event.Time.Local().Format("15:04:05"), terminalSafeInline(event.Device), terminalSafeInline(string(event.State)), terminalSafeInline(event.Message))
+			terminalWritef(output, "%s  %-16s %-16s %s\n", event.Time.Local().Format("15:04:05"), terminalSafeInline(event.Device), terminalSafeInline(string(event.State)), terminalSafeInline(event.Message))
 		}
 	}
 	if message != "" {
-		fmt.Fprintf(output, "\n%s\n", terminalSafeInline(message))
+		terminalWritef(output, "\n%s\n", terminalSafeInline(message))
 	}
 	if clear {
-		fmt.Fprintln(output, "\n[a] add candidate  [i] ignore  [p] poll device  [l] clear latch  [r] refresh  [q] quit")
+		terminalWriteLine(output, "\n[a] add candidate  [i] ignore  [p] poll device  [l] clear latch  [r] refresh  [q] quit")
 	}
 	return nil
 }
@@ -279,7 +279,7 @@ func enrollCandidateFromTUI(ctx context.Context, output io.Writer, keys <-chan b
 	// already strips control runes at ingestion, but every print site in this
 	// package sanitizes independently so the guarantee does not depend on
 	// another package's ingestion rules.
-	fmt.Fprintf(output, "\r\nOn the candidate Mac, run:\r\n  ssh-keygen -lf %s\r\nExpected candidate identity: %s\r\n",
+	terminalWritef(output, "\r\nOn the candidate Mac, run:\r\n  ssh-keygen -lf %s\r\nExpected candidate identity: %s\r\n",
 		terminalSafeInline(candidateHostKeyPath(candidate.KeyType)), terminalSafeInline(candidate.Fingerprint))
 	verified, err := promptRawLine(output, keys, "Enter the complete fingerprint displayed locally on the Mac")
 	if err != nil {
@@ -352,8 +352,8 @@ func enrollCandidateFromTUI(ctx context.Context, output io.Writer, keys <-chan b
 	if err := control.DoJSON(requestCtx, client, http.MethodPost, endpoint, request, &response); err != nil {
 		return "Enrollment failed: " + err.Error()
 	}
-	if response.SchemaVersion != controlAPISchemaVersion {
-		return fmt.Sprintf("Enrollment failed: unsupported daemon API schema %d", response.SchemaVersion)
+	if err := checkControlSchema(response.SchemaVersion); err != nil {
+		return "Enrollment failed: " + err.Error()
 	}
 	return fmt.Sprintf("Added %s; monitoring starts immediately.", name)
 }
@@ -420,8 +420,8 @@ func deviceActionFromTUI(ctx context.Context, output io.Writer, keys <-chan byte
 		if err := control.DoJSON(requestCtx, client, http.MethodPost, endpoint, nil, &response); err != nil {
 			return "poll failed: " + err.Error()
 		}
-		if response.SchemaVersion != controlAPISchemaVersion {
-			return fmt.Sprintf("poll failed: unsupported daemon API schema %d", response.SchemaVersion)
+		if err := checkControlSchema(response.SchemaVersion); err != nil {
+			return "poll failed: " + err.Error()
 		}
 		if response.Error != "" {
 			return fmt.Sprintf("Poll completed for %s: %s (%s).", device.Name, response.Device.State, terminalSafeInline(response.Error))
@@ -435,8 +435,8 @@ func deviceActionFromTUI(ctx context.Context, output io.Writer, keys <-chan byte
 	if err := control.DoJSON(requestCtx, client, http.MethodPost, endpoint, nil, &response); err != nil {
 		return action + " failed: " + err.Error()
 	}
-	if response.SchemaVersion != controlAPISchemaVersion {
-		return fmt.Sprintf("%s failed: unsupported daemon API schema %d", action, response.SchemaVersion)
+	if err := checkControlSchema(response.SchemaVersion); err != nil {
+		return action + " failed: " + err.Error()
 	}
 	return fmt.Sprintf("%s completed for %s.", action, device.Name)
 }
@@ -465,28 +465,28 @@ func promptRawLineDefault(output io.Writer, keys <-chan byte, label, defaultValu
 }
 
 func promptRawLine(output io.Writer, keys <-chan byte, label string) (string, error) {
-	fmt.Fprintf(output, "\r\n%s: \x1b[?25h", label)
+	terminalWritef(output, "\r\n%s: \x1b[?25h", label)
 	var value []rune
-	defer fmt.Fprint(output, "\x1b[?25l")
+	defer terminalWrite(output, "\x1b[?25l")
 	for {
 		key := <-keys
 		switch key {
 		case 3, 27:
-			fmt.Fprint(output, "\r\n")
+			terminalWrite(output, "\r\n")
 			return "", errors.New("cancelled")
 		case '\r', '\n':
-			fmt.Fprint(output, "\r\n")
+			terminalWrite(output, "\r\n")
 			return string(value), nil
 		case 8, 127:
 			if len(value) > 0 {
 				value = value[:len(value)-1]
-				fmt.Fprint(output, "\b \b")
+				terminalWrite(output, "\b \b")
 			}
 		default:
 			r := rune(key)
 			if unicode.IsPrint(r) && len(value) < 4096 {
 				value = append(value, r)
-				fmt.Fprintf(output, "%c", r)
+				terminalWritef(output, "%c", r)
 			}
 		}
 	}
