@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.2.0-rc.3] - 2026-09-01
+
 ### Added
 
 - Project-owned Homebrew and Scoop sources for prerelease installation, plus
@@ -21,6 +23,9 @@ All notable changes to this project are documented here.
   `candidate.dropped` and `candidate.evicted` capacity events.
 - Container author and GitHub Sponsors metadata exposed as OCI labels without
   adding files or packages to the scratch image.
+- A one-line GitHub Sponsors link after selected successful terminal setup and
+  discovery flows, excluded from JSON, redirected output, daemon logs, health
+  checks, status, unlock, and one-shot TUI output.
 
 ### Changed
 

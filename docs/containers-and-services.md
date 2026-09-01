@@ -21,7 +21,7 @@ credentials, and the persistent daemon refuses them.
 
 The public image is
 [`shoonimages/fv-ssh-unlock`](https://hub.docker.com/r/shoonimages/fv-ssh-unlock).
-Release tags such as `v0.2.0-rc.2` are available for `linux/amd64` and
+Release tags such as `v0.2.0-rc.3` are available for `linux/amd64` and
 `linux/arm64`. There is no 32-bit ARM/ARMv7 image and no `latest` tag. A
 Raspberry Pi must run a 64-bit OS:
 
@@ -60,7 +60,7 @@ settings.
 
 ```bash
 IMAGE=shoonimages/fv-ssh-unlock
-TAG=v0.2.0-rc.2
+TAG=v0.2.0-rc.3
 
 DIGEST="$(docker buildx imagetools inspect "$IMAGE:$TAG" \
   --format '{{.Manifest.Digest}}')"

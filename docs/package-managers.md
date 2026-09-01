@@ -13,7 +13,7 @@ signed checksum file and per-archive SBOMs.
 | Homebrew tap | Available for the current prerelease | macOS and Linux, AMD64 and ARM64 | `brew update` and `brew upgrade` |
 | Scoop bucket | Available for the current prerelease | Windows AMD64 and ARM64 | `scoop update` and `scoop update fv-ssh-unlock` |
 | GitHub release archives | Available | macOS, Linux, and Windows on AMD64 and ARM64 | Download each version explicitly |
-| DEB and RPM release assets | Enabled for the next release built after this change | Linux AMD64 and ARM64 | Install each downloaded package explicitly; this is not an APT or DNF repository |
+| DEB and RPM release assets | Available for the current prerelease | Linux AMD64 and ARM64 | Install each downloaded package explicitly; this is not an APT or DNF repository |
 | WinGet community repository | Planned for stable `v0.2.0` | Windows AMD64 and ARM64 | Normal WinGet upgrades after Microsoft accepts the initial manifest |
 | Docker Hub | Available | Linux AMD64 and ARM64 | Pull an explicit version or digest |
 
@@ -68,10 +68,10 @@ scoop uninstall fv-ssh-unlock
 
 ## DEB and RPM files
 
-The release workflow now produces `.deb` and `.rpm` files for Linux AMD64 and
-ARM64. `v0.2.0-rc.2` was published before that workflow change, so its release
-page contains archives but not native Linux packages. Use a later release page
-whose asset list includes the package you need.
+The release workflow produces `.deb` and `.rpm` files for Linux AMD64 and
+ARM64. These packages are available on the current prerelease page. The older
+`v0.2.0-rc.2` release predates native package publication and contains archives
+only.
 
 Install a downloaded Debian or Ubuntu package:
 
