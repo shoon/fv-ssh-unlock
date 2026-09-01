@@ -111,11 +111,12 @@ func main() {
 	defer stop()
 
 	rootCmd := &cobra.Command{
-		Use:           "fv-ssh-unlock",
-		Short:         "Unlock FileVault-protected macOS devices over SSH",
-		Long:          rootLongHelp,
-		Version:       version,
-		SilenceErrors: true,
+		Use:               "fv-ssh-unlock",
+		Short:             "Unlock FileVault-protected macOS devices over SSH",
+		Long:              rootLongHelp,
+		Version:           version,
+		SilenceErrors:     true,
+		PersistentPostRun: sponsorPostRun,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return cmd.Help()
 		},
@@ -131,10 +132,11 @@ func main() {
 	}
 
 	addCmd := &cobra.Command{
-		Use:   "add [name]",
-		Short: "Add a device",
-		Long:  addLongHelp,
-		Args:  cobra.MaximumNArgs(1),
+		Use:         "add [name]",
+		Short:       "Add a device",
+		Long:        addLongHelp,
+		Args:        cobra.MaximumNArgs(1),
+		Annotations: map[string]string{sponsorFooterAnnotation: sponsorFooterHuman},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			host, _ := cmd.Flags().GetString("host")
 			user, _ := cmd.Flags().GetString("user")

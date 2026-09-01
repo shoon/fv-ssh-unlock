@@ -49,9 +49,10 @@ type dashboardSnapshot struct {
 
 func newTUICommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "tui",
-		Short: "Open a terminal dashboard for the persistent daemon",
-		Args:  cobra.NoArgs,
+		Use:         "tui",
+		Short:       "Open a terminal dashboard for the persistent daemon",
+		Args:        cobra.NoArgs,
+		Annotations: map[string]string{sponsorFooterAnnotation: sponsorFooterInteractiveTUI},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			socket, _ := cmd.Flags().GetString("socket")
 			if socket == "" {

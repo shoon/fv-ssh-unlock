@@ -39,9 +39,10 @@ var discoverServices = []string{"_ssh._tcp", "_sftp-ssh._tcp"}
 // network for SSH services advertised over mDNS/Bonjour.
 func newDiscoverCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "discover",
-		Short: "List booted, Bonjour-advertised SSH services on the local network",
-		Args:  cobra.NoArgs,
+		Use:         "discover",
+		Short:       "List booted, Bonjour-advertised SSH services on the local network",
+		Args:        cobra.NoArgs,
+		Annotations: map[string]string{sponsorFooterAnnotation: sponsorFooterHuman},
 		Long: `Browse the local network for SSH services advertised over mDNS/Bonjour
 and print their names, hostnames, ports, and IP addresses.
 

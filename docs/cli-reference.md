@@ -11,6 +11,12 @@ fv-ssh-unlock unlock --help
 fv-ssh-unlock completion powershell --help
 ```
 
+After a successful interactive setup, discovery, scan, provider report, or TUI
+session, the CLI may print one short GitHub Sponsors link. The footer is shown
+only when standard output is a terminal. It is excluded from redirected output,
+JSON, daemon logs, health checks, status and unlock commands, and one-shot TUI
+snapshots.
+
 ## Top-level commands
 
 | Command | Purpose |

@@ -59,10 +59,11 @@ test. Each invocation is limited to 4096 IPv4 addresses.`
 // newScanCommand returns the explicit, active SSH subnet scanner.
 func newScanCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "scan",
-		Short: "Actively find SSH servers in an explicit IPv4 CIDR without sending credentials",
-		Long:  scanLongHelp,
-		Args:  cobra.NoArgs,
+		Use:         "scan",
+		Short:       "Actively find SSH servers in an explicit IPv4 CIDR without sending credentials",
+		Long:        scanLongHelp,
+		Args:        cobra.NoArgs,
+		Annotations: map[string]string{sponsorFooterAnnotation: sponsorFooterHuman},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cidrs, _ := cmd.Flags().GetStringSlice("cidr")
 			port, _ := cmd.Flags().GetInt("port")
