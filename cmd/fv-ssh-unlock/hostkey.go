@@ -182,13 +182,9 @@ func verifyHostKeyLocked(path string, acceptNew bool, expectedFingerprint string
 	return verr
 }
 
-// withKnownHostsLock runs fn while holding the OS-level known_hosts lock, so
-// concurrent processes cannot enroll different keys for the same host or read a
-// half-written file.
-func withKnownHostsLock(path string, fn func() error) error {
-	return withKnownHostsLockContext(context.Background(), path, fn)
-}
-
+// withKnownHostsLockContext runs fn while holding the OS-level known_hosts
+// lock, so concurrent processes cannot enroll different keys for the same host
+// or read a half-written file.
 func withKnownHostsLockContext(ctx context.Context, path string, fn func() error) error {
 	lock, err := securefs.AcquireLockContext(ctx, path+".lock", "known_hosts")
 	if err != nil {
