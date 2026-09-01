@@ -6,9 +6,26 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"strings"
 	"unicode"
 )
+
+// Terminal redraws and progress messages are best effort. Once their writer is
+// gone there is no recovery action the command can take, so these helpers make
+// that policy explicit without relying on linter exclusions tied to variable
+// names.
+func terminalWrite(writer io.Writer, values ...any) {
+	_, _ = fmt.Fprint(writer, values...)
+}
+
+func terminalWriteLine(writer io.Writer, values ...any) {
+	_, _ = fmt.Fprintln(writer, values...)
+}
+
+func terminalWritef(writer io.Writer, format string, values ...any) {
+	_, _ = fmt.Fprintf(writer, format, values...)
+}
 
 func terminalSafeInline(s string) string {
 	// Keep these explicit replacements before the general Unicode-control

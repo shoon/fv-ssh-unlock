@@ -29,3 +29,6 @@ coverage.html
 # Mock server ephemeral host key (generated at runtime)
 /mock_host_key
 tools/mock-fv-ssh-server/mock_host_key
+
+# Generated at release time by the goreleaser before-hook (package-only systemd unit)
+.packaging/

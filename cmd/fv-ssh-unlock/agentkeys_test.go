@@ -58,7 +58,7 @@ func TestReadIdentityFileRejectsOpenPermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := readIdentityFile(path)
-	if err == nil || !strings.Contains(err.Error(), "too open") {
+	if err == nil || !strings.Contains(err.Error(), "insecure identity file") {
 		t.Fatalf("permission error = %v", err)
 	}
 }

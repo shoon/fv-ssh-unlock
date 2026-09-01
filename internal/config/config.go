@@ -6,13 +6,14 @@ package config
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/netip"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"unicode"
@@ -22,6 +23,12 @@ import (
 )
 
 const maxConfigSize = 1 << 20
+
+// ErrDeviceChanged means a conditional rollback found that another writer had
+// already replaced the device. The replacement is preserved.
+var ErrDeviceChanged = errors.New("device changed since it was added")
+
+var errNoMutation = errors.New("configuration mutation is already satisfied")
 
 // Device represents a configured target device.
 type Device struct {
@@ -37,38 +44,69 @@ type Device struct {
 	AutoUnlock       bool   `json:"auto_unlock,omitempty"`
 }
 
-// Store manages a JSON file of devices.
+// Store manages a JSON file of devices. The in-process mutex orders goroutines
+// inside one process; an advisory lock on a sidecar file orders the daemon
+// against a separate CLI process, so a load-modify-save cycle cannot silently
+// lose a device written by the other one.
 type Store struct {
 	Path string
 	mu   sync.Mutex
 }
 
+// lockPath is the sidecar whose advisory lock guards the store. It is a
+// separate file so the lock survives the atomic rename that replaces the store.
+func (s *Store) lockPath() string { return s.Path + ".lock" }
+
+// mutate serializes a read-modify-write of the store against every other
+// process, re-reading the file under the lock so a concurrent writer's device
+// is never overwritten from a stale in-memory copy.
+func (s *Store) mutate(ctx context.Context, apply func([]Device) ([]Device, error), prepare func() error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	lock, err := securefs.AcquireLockContext(ctx, s.lockPath(), "configuration")
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
+	devs, err := s.Load()
+	if err != nil {
+		return err
+	}
+	next, err := apply(devs)
+	if err != nil {
+		if errors.Is(err, errNoMutation) {
+			return nil
+		}
+		return err
+	}
+	// Validate before preparing external state. In particular, a keyring write
+	// must not happen until duplicate names and credential-environment
+	// collisions have been checked while the cross-process lock is held.
+	if err := validateDevices(next); err != nil {
+		return err
+	}
+	if prepare != nil {
+		if err := prepare(); err != nil {
+			return err
+		}
+	}
+	if err := s.save(next); err != nil {
+		if prepare != nil {
+			return fmt.Errorf("save configuration after preparing external state; prepared state was retained for safety: %w", err)
+		}
+		return err
+	}
+	return nil
+}
+
 // Load returns the list of devices from the store file.
 func (s *Store) Load() ([]Device, error) {
-	info, err := os.Lstat(s.Path)
+	f, err := securefs.ReadPrivate(s.Path, "configuration", maxConfigSize)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
 		return nil, err
-	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-		return nil, fmt.Errorf("configuration is not a regular file: %s", s.Path)
-	}
-	if info.Size() > maxConfigSize {
-		return nil, fmt.Errorf("configuration exceeds %d bytes", maxConfigSize)
-	}
-	fh, err := os.Open(s.Path)
-	if err != nil {
-		return nil, err
-	}
-	defer fh.Close()
-	f, err := io.ReadAll(io.LimitReader(fh, maxConfigSize+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(f) > maxConfigSize {
-		return nil, fmt.Errorf("configuration exceeds %d bytes", maxConfigSize)
 	}
 	var devs []Device
 	decoder := json.NewDecoder(bytes.NewReader(f))
@@ -85,10 +123,17 @@ func (s *Store) Load() ([]Device, error) {
 	return devs, nil
 }
 
-// Save writes the devices to the store file.
+// Save replaces the devices in the store file. The caller-supplied inventory is
+// authoritative, but the cross-process lock is still held so the replacement
+// cannot interleave with another process's read-modify-write cycle.
 func (s *Store) Save(devs []Device) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	lock, err := securefs.AcquireLock(s.lockPath(), "configuration")
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
 	return s.save(devs)
 }
 
@@ -96,6 +141,7 @@ func (s *Store) save(devs []Device) error {
 	if err := validateDevices(devs); err != nil {
 		return err
 	}
+	// #nosec G117 -- Device.Cred is a credential provider reference (a keyring entry or file path), never secret material; secrets live only in the OS keyring, credential file, or TPM.
 	b, err := json.MarshalIndent(devs, "", "  ")
 	if err != nil {
 		return err
@@ -103,104 +149,93 @@ func (s *Store) save(devs []Device) error {
 	if len(b) > maxConfigSize {
 		return fmt.Errorf("configuration exceeds %d bytes", maxConfigSize)
 	}
-	dir := filepath.Dir(s.Path)
-	if err := securefs.EnsurePrivateDirectory(dir, "configuration"); err != nil {
-		return err
-	}
-	if info, err := os.Lstat(s.Path); err == nil {
-		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("configuration is not a regular file: %s", s.Path)
-		}
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-
-	tmp, err := os.CreateTemp(dir, ".devices-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(b); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := replaceFile(tmpName, s.Path); err != nil {
-		return err
-	}
-	return os.Chmod(s.Path, 0o600)
+	return securefs.WritePrivate(s.Path, "configuration", ".devices-*.tmp", b)
 }
 
 // Add adds a device to the store.
 func (s *Store) Add(d Device) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	devs, err := s.Load()
-	if err != nil {
-		return err
-	}
-	// prevent duplicate device names
-	for _, ex := range devs {
-		if ex.Name == d.Name {
-			return fmt.Errorf("device already exists: %s", d.Name)
+	return s.AddContext(context.Background(), d)
+}
+
+// AddContext adds a device and permits cancellation while waiting for another
+// process to finish a configuration transaction.
+func (s *Store) AddContext(ctx context.Context, d Device) error {
+	return s.addPrepared(ctx, d, nil)
+}
+
+// AddPrepared adds a device and runs prepare only after validation and the
+// duplicate check succeed under the cross-process configuration lock. It is
+// intended for external state, such as storing a keyring credential, that must
+// never be overwritten by a losing concurrent add.
+func (s *Store) AddPrepared(d Device, prepare func() error) error {
+	return s.addPrepared(context.Background(), d, prepare)
+}
+
+func (s *Store) addPrepared(ctx context.Context, d Device, prepare func() error) error {
+	return s.mutate(ctx, func(devs []Device) ([]Device, error) {
+		// prevent duplicate device names
+		for _, ex := range devs {
+			if ex.Name == d.Name {
+				return nil, fmt.Errorf("device already exists: %s", d.Name)
+			}
 		}
-	}
-	devs = append(devs, d)
-	return s.save(devs)
+		return append(devs, d), nil
+	}, prepare)
 }
 
 // Update replaces an existing device with the same name.
 func (s *Store) Update(d Device) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if err := ValidateDevice(d); err != nil {
 		return err
 	}
-	devs, err := s.Load()
-	if err != nil {
-		return err
-	}
-	for i := range devs {
-		if devs[i].Name == d.Name {
-			devs[i] = d
-			return s.save(devs)
+	return s.mutate(context.Background(), func(devs []Device) ([]Device, error) {
+		for i := range devs {
+			if devs[i].Name == d.Name {
+				devs[i] = d
+				return devs, nil
+			}
 		}
-	}
-	return fmt.Errorf("device not found: %s", d.Name)
+		return nil, fmt.Errorf("device not found: %s", d.Name)
+	}, nil)
 }
 
 // Remove deletes a device by name.
 func (s *Store) Remove(name string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	devs, err := s.Load()
-	if err != nil {
-		return err
-	}
-	out := make([]Device, 0, len(devs))
-	found := false
-	for _, d := range devs {
-		if d.Name == name {
-			found = true
-			continue
+	return s.mutate(context.Background(), func(devs []Device) ([]Device, error) {
+		out := make([]Device, 0, len(devs))
+		found := false
+		for _, d := range devs {
+			if d.Name == name {
+				found = true
+				continue
+			}
+			out = append(out, d)
 		}
-		out = append(out, d)
-	}
-	if !found {
-		return fmt.Errorf("device not found: %s", name)
-	}
-	return s.save(out)
+		if !found {
+			return nil, fmt.Errorf("device not found: %s", name)
+		}
+		return out, nil
+	}, nil)
+}
+
+// RemoveIfUnchangedContext removes expected only if the current entry is
+// byte-for-byte identical. It makes rollback safe when another process can
+// replace the same device name between the original add and cleanup. A missing
+// entry is already rolled back and succeeds; a replacement is preserved and
+// reported as ErrDeviceChanged.
+func (s *Store) RemoveIfUnchangedContext(ctx context.Context, expected Device) error {
+	return s.mutate(ctx, func(devs []Device) ([]Device, error) {
+		for i, device := range devs {
+			if device.Name != expected.Name {
+				continue
+			}
+			if device != expected {
+				return nil, fmt.Errorf("%w: %s", ErrDeviceChanged, expected.Name)
+			}
+			return append(devs[:i:i], devs[i+1:]...), nil
+		}
+		return nil, errNoMutation
+	}, nil)
 }
 
 // ValidateDevice rejects values that could redirect a credential to an

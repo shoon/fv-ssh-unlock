@@ -146,8 +146,8 @@ adding these flags, then restart the service. Do not run a second daemon against
 the same data directory.
 
 Both discovery rounds run immediately at startup. Bonjour may first create a
-`discovered` candidate with no fingerprint. The daemon's active scan—not the
-one-shot `scan` command—adds the fingerprint to the persistent inbox and moves
+`discovered` candidate with no fingerprint. The daemon's active scan, not the
+one-shot `scan` command, adds the fingerprint to the persistent inbox and moves
 it to `identity_pending`.
 
 Open another terminal:

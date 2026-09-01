@@ -40,6 +40,12 @@ package manager, libc, CA bundle, or OS packages are present. It runs as
 numeric UID/GID `65532`, defaults to the daemon command, and uses the binary's
 internal health check rather than `curl`.
 
+The current Dockerfile records its author and the project's GitHub Sponsors
+page as OCI labels. This is manifest metadata and does not add files, packages,
+or software components to the scratch filesystem. Images published before
+this metadata was added do not contain these labels; the Docker Hub repository
+overview still links to the same sponsorship page.
+
 The image deliberately omits the desktop keyring build tag and its D-Bus
 integration. Use a Linux service secret under `/run/secrets`; use the native
 keyring-enabled binary for macOS or Windows credential-store integration.
@@ -124,6 +130,10 @@ Maintainers and source-build users can run the same runtime-contract verifier:
 docker build --tag fv-ssh-unlock:test .
 ./hack/verify-container-image.sh fv-ssh-unlock:test
 docker image history fv-ssh-unlock:test
+docker image inspect fv-ssh-unlock:test --format \
+  '{{index .Config.Labels "org.opencontainers.image.authors"}}'
+docker image inspect fv-ssh-unlock:test --format \
+  '{{index .Config.Labels "io.github.shoon.sponsors"}}'
 ```
 
 The verifier asserts the non-root identity, single filesystem layer,
@@ -386,20 +396,31 @@ container runtime.
 
 ### Install the service
 
-Use the Linux ARM64 archive on a 64-bit Raspberry Pi OS installation. From the
-matching extracted release directory:
+Create the dedicated account and credential directory for either installation
+method:
 
 ```bash
 getent passwd fv-ssh-unlock >/dev/null || \
   sudo useradd --system --home-dir /var/lib/fv-ssh-unlock \
     --shell /usr/sbin/nologin fv-ssh-unlock
 
+sudo install -d -o root -g root -m 0700 /etc/credstore.encrypted
+```
+
+The DEB and RPM packages already install the binary as
+`/usr/bin/fv-ssh-unlock` and the unit as
+`/usr/lib/systemd/system/fv-ssh-unlock.service`. Do not replace either packaged
+file with the archive version.
+
+For an archive installation, use the Linux ARM64 archive on a 64-bit Raspberry
+Pi OS installation. From the matching extracted release directory:
+
+```bash
 sudo install -o root -g root -m 0755 fv-ssh-unlock \
   /usr/local/bin/fv-ssh-unlock
 sudo install -o root -g root -m 0644 \
   deploy/systemd/fv-ssh-unlock.service \
   /etc/systemd/system/fv-ssh-unlock.service
-sudo install -d -o root -g root -m 0700 /etc/credstore.encrypted
 ```
 
 Review every hardening directive on the target distribution: older Raspberry
@@ -441,7 +462,18 @@ rest.
 
 Create a service drop-in with one `LoadCredentialEncrypted=` line per
 `systemd:<name>` device reference. Preserve the complete `ExecStart` while
-adding the verification key and structured service logging:
+adding the verification key and structured service logging. Use the first
+`ExecStart` for a DEB/RPM installation:
+
+```ini
+[Service]
+LoadCredentialEncrypted=m4alpha:/etc/credstore.encrypted/m4alpha.cred
+LoadCredentialEncrypted=macos-ssh-identity:/etc/credstore.encrypted/macos-ssh-identity.cred
+ExecStart=
+ExecStart=/usr/bin/fv-ssh-unlock daemon --socket /run/fv-ssh-unlock/control.sock --identity %d/macos-ssh-identity --log-format json --log-level info
+```
+
+For an archive installation, use the `/usr/local/bin` path instead:
 
 ```ini
 [Service]
@@ -465,9 +497,11 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now fv-ssh-unlock.service
 sudo systemctl --no-pager --full status fv-ssh-unlock.service
 
-sudo -u fv-ssh-unlock /usr/local/bin/fv-ssh-unlock healthcheck \
+# DEB/RPM package; use /usr/local/bin/fv-ssh-unlock for an archive install.
+FV_SSH_UNLOCK_BIN=/usr/bin/fv-ssh-unlock
+sudo -u fv-ssh-unlock "$FV_SSH_UNLOCK_BIN" healthcheck \
   --socket /run/fv-ssh-unlock/control.sock --json
-sudo -u fv-ssh-unlock /usr/local/bin/fv-ssh-unlock tui \
+sudo -u fv-ssh-unlock "$FV_SSH_UNLOCK_BIN" tui \
   --socket /run/fv-ssh-unlock/control.sock
 ```
 
@@ -476,10 +510,14 @@ operator clients as `fv-ssh-unlock`; an ordinary login user is intentionally
 denied. Follow startup and recovery events with `sudo journalctl -u
 fv-ssh-unlock.service -f -o cat`.
 
-To upgrade, verify the new native release, stop the unit, replace only the
-binary, and start it again. Keep the previous verified binary available for
-rollback and do not delete `/var/lib/fv-ssh-unlock`: it contains the pinned
-keys and durable one-attempt safety state.
+For an archive installation, upgrade by verifying the new native release,
+stopping the unit, replacing only `/usr/local/bin/fv-ssh-unlock`, and starting
+it again. For a DEB/RPM installation, install the verified newer package with
+the same package manager rather than replacing `/usr/bin` by hand, then reload
+systemd and restart the unit. Keep the previous verified binary or package
+available for rollback. Neither upgrade path should delete
+`/var/lib/fv-ssh-unlock`; it contains the pinned keys and durable one-attempt
+safety state.
 
 ## Service logs
 

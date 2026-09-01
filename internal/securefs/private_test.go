@@ -45,3 +45,28 @@ func TestEnsurePrivateDirectoryDoesNotChmodSharedDirectory(t *testing.T) {
 		t.Fatalf("shared directory mode changed to %o", info.Mode().Perm())
 	}
 }
+
+func TestEnsurePrivateDirectoryRejectsFileAndSymlink(t *testing.T) {
+	root := t.TempDir()
+	file := filepath.Join(root, "not-a-directory")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsurePrivateDirectory(file, "test"); err == nil {
+		t.Fatal("regular file was accepted as a private directory")
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	target := filepath.Join(root, "private")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "private-link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsurePrivateDirectory(link, "test"); err == nil {
+		t.Fatal("symlink was accepted as a private directory")
+	}
+}

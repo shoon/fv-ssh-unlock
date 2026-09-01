@@ -66,13 +66,16 @@ func newHealthcheckCommand() *cobra.Command {
 			if err := control.GetJSON(ctx, control.Client(socket, timeout), "/v1/health", &health); err != nil {
 				return err
 			}
+			if err := checkControlSchema(health.SchemaVersion); err != nil {
+				return err
+			}
 			if !health.OK {
 				return fmt.Errorf("daemon reported unhealthy")
 			}
 			if jsonOutput, _ := cmd.Flags().GetBool("json"); jsonOutput {
 				return writeJSON(cmd.OutOrStdout(), health)
 			}
-			fmt.Fprintln(cmd.OutOrStdout(), "healthy")
+			terminalWriteLine(cmd.OutOrStdout(), "healthy")
 			return nil
 		},
 	}
@@ -80,4 +83,11 @@ func newHealthcheckCommand() *cobra.Command {
 	cmd.Flags().Duration("timeout", 3*time.Second, "Health-check timeout")
 	cmd.Flags().Bool("json", false, "Emit a machine-readable JSON response")
 	return cmd
+}
+
+func checkControlSchema(version int) error {
+	if version != controlAPISchemaVersion {
+		return fmt.Errorf("unsupported daemon API schema %d", version)
+	}
+	return nil
 }

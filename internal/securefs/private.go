@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 )
 
 // EnsurePrivateDirectory creates path when absent and otherwise verifies it.
@@ -18,10 +17,12 @@ import (
 func EnsurePrivateDirectory(path, purpose string) error {
 	clean := filepath.Clean(path)
 	info, err := os.Lstat(clean)
+	created := false
 	if os.IsNotExist(err) {
 		if err := os.MkdirAll(clean, 0o700); err != nil {
 			return err
 		}
+		created = true
 		info, err = os.Lstat(clean)
 	}
 	if err != nil {
@@ -30,8 +31,5 @@ func EnsurePrivateDirectory(path, purpose string) error {
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("%s directory is not a secure directory: %s", purpose, clean)
 	}
-	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
-		return fmt.Errorf("%s directory must not be accessible by group or other users: %s", purpose, clean)
-	}
-	return nil
+	return verifyOrSecurePrivateDirectory(clean, purpose, info, created)
 }

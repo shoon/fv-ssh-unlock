@@ -24,13 +24,16 @@ import (
 	"golang.org/x/term"
 
 	"github.com/shoon/fv-ssh-unlock/internal/candidates"
+	"github.com/shoon/fv-ssh-unlock/internal/config"
 	"github.com/shoon/fv-ssh-unlock/internal/control"
 	"github.com/shoon/fv-ssh-unlock/internal/credentials"
 	"github.com/shoon/fv-ssh-unlock/internal/monitor"
 )
 
 type devicesAPIResponse struct {
-	SchemaVersion int `json:"schema_version"`
+	SchemaVersion int           `json:"schema_version"`
+	ProbeTimeout  time.Duration `json:"probe_timeout"`
+	UnlockTimeout time.Duration `json:"unlock_timeout"`
 	monitor.Snapshot
 }
 
@@ -46,9 +49,10 @@ type dashboardSnapshot struct {
 
 func newTUICommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "tui",
-		Short: "Open a terminal dashboard for the persistent daemon",
-		Args:  cobra.NoArgs,
+		Use:         "tui",
+		Short:       "Open a terminal dashboard for the persistent daemon",
+		Args:        cobra.NoArgs,
+		Annotations: map[string]string{sponsorFooterAnnotation: sponsorFooterInteractiveTUI},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			socket, _ := cmd.Flags().GetString("socket")
 			if socket == "" {
@@ -65,7 +69,10 @@ func newTUICommand() *cobra.Command {
 			if refresh <= 0 {
 				return errors.New("--refresh must be greater than zero")
 			}
-			client := control.Client(socket, 5*time.Second)
+			// Individual requests carry operation-appropriate context deadlines.
+			// A global five-second http.Client timeout would otherwise cancel an
+			// enrollment or poll while its bounded SSH operation is still running.
+			client := control.Client(socket, 0)
 			once, _ := cmd.Flags().GetBool("once")
 			jsonOutput, _ := cmd.Flags().GetBool("json")
 			if once || jsonOutput {
@@ -95,14 +102,14 @@ func fetchDashboard(ctx context.Context, client *http.Client) (dashboardSnapshot
 	if err := control.GetJSON(requestCtx, client, "/v1/devices", &snapshot.Devices); err != nil {
 		return snapshot, err
 	}
-	if snapshot.Devices.SchemaVersion != controlAPISchemaVersion {
-		return snapshot, fmt.Errorf("unsupported daemon API schema %d", snapshot.Devices.SchemaVersion)
+	if err := checkControlSchema(snapshot.Devices.SchemaVersion); err != nil {
+		return snapshot, err
 	}
 	if err := control.GetJSON(requestCtx, client, "/v1/candidates", &snapshot.Candidates); err != nil {
 		return snapshot, err
 	}
-	if snapshot.Candidates.SchemaVersion != controlAPISchemaVersion {
-		return snapshot, fmt.Errorf("unsupported daemon API schema %d", snapshot.Candidates.SchemaVersion)
+	if err := checkControlSchema(snapshot.Candidates.SchemaVersion); err != nil {
+		return snapshot, err
 	}
 	return snapshot, nil
 }
@@ -117,9 +124,9 @@ func runInteractiveTUI(ctx context.Context, input io.Reader, output io.Writer, c
 	if err != nil {
 		return err
 	}
-	defer term.Restore(int(inFile.Fd()), oldState)
-	defer fmt.Fprint(output, "\x1b[?25h\x1b[0m\r\n")
-	fmt.Fprint(output, "\x1b[?25l")
+	defer func() { _ = term.Restore(int(inFile.Fd()), oldState) }()
+	defer terminalWrite(output, "\x1b[?25h\x1b[0m\r\n")
+	terminalWrite(output, "\x1b[?25l")
 
 	keys := make(chan byte, 32)
 	readErrors := make(chan error, 1)
@@ -159,16 +166,16 @@ func runInteractiveTUI(ctx context.Context, input io.Reader, output io.Writer, c
 			case 'r':
 				refreshNow()
 			case 'a':
-				message = enrollCandidateFromTUI(ctx, output, keys, client, snapshot.Candidates.Snapshot)
+				message = enrollCandidateFromTUI(ctx, output, keys, client, snapshot.Candidates.Snapshot, snapshot.Devices.ProbeTimeout)
 				refreshNow()
 			case 'i':
 				message = candidateActionFromTUI(ctx, output, keys, client, snapshot.Candidates.Snapshot, "ignore")
 				refreshNow()
 			case 'p':
-				message = deviceActionFromTUI(ctx, output, keys, client, snapshot.Devices.Snapshot, "poll")
+				message = deviceActionFromTUI(ctx, output, keys, client, snapshot.Devices.Snapshot, "poll", snapshot.Devices.ProbeTimeout, snapshot.Devices.UnlockTimeout)
 				refreshNow()
 			case 'l':
-				message = deviceActionFromTUI(ctx, output, keys, client, snapshot.Devices.Snapshot, "clear-latch")
+				message = deviceActionFromTUI(ctx, output, keys, client, snapshot.Devices.Snapshot, "clear-latch", snapshot.Devices.ProbeTimeout, snapshot.Devices.UnlockTimeout)
 				refreshNow()
 			}
 		}
@@ -191,12 +198,12 @@ func readTerminalKeys(input *os.File, keys chan<- byte, errs chan<- error) {
 
 func renderDashboard(output io.Writer, snapshot dashboardSnapshot, clear bool, message string) error {
 	if clear {
-		fmt.Fprint(output, "\x1b[H\x1b[2J")
+		terminalWrite(output, "\x1b[H\x1b[2J")
 	}
-	fmt.Fprintf(output, "fv-ssh-unlock  %d managed Mac(s)  %d candidate(s)  %s\n\n",
+	terminalWritef(output, "fv-ssh-unlock  %d managed Mac(s)  %d candidate(s)  %s\n\n",
 		len(snapshot.Devices.Devices), len(snapshot.Candidates.Candidates), time.Now().Format("15:04:05"))
 	tw := tabwriter.NewWriter(output, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "#\tHOST\tSTATE\tLAST CHECK\tAUTO\tNEXT ACTION")
+	terminalWriteLine(tw, "#\tHOST\tSTATE\tLAST CHECK\tAUTO\tNEXT ACTION")
 	for index, device := range snapshot.Devices.Devices {
 		auto := "no"
 		if device.AutoUnlock {
@@ -206,52 +213,52 @@ func renderDashboard(output io.Writer, snapshot dashboardSnapshot, clear bool, m
 		if !device.NextCheckAt.IsZero() {
 			next = relativeTime(device.NextCheckAt)
 		}
-		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\n", index+1, terminalSafeInline(device.Name), device.State,
+		terminalWritef(tw, "%d\t%s\t%s\t%s\t%s\t%s\n", index+1, terminalSafeInline(device.Name), terminalSafeInline(string(device.State)),
 			relativeTime(device.LastCheckedAt), auto, next)
 	}
 	if len(snapshot.Devices.Devices) == 0 {
-		fmt.Fprintln(tw, "-\t(no configured devices)\t-\t-\t-\t-")
+		terminalWriteLine(tw, "-\t(no configured devices)\t-\t-\t-\t-")
 	}
 	if err := tw.Flush(); err != nil {
 		return err
 	}
 
-	fmt.Fprintln(output, "\nCandidate inbox")
+	terminalWriteLine(output, "\nCandidate inbox")
 	tw = tabwriter.NewWriter(output, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "#\tADDRESS / NAME\tSTATE\tFINGERPRINT\tSEEN")
+	terminalWriteLine(tw, "#\tADDRESS / NAME\tSTATE\tFINGERPRINT\tSEEN")
 	for index, candidate := range snapshot.Candidates.Candidates {
 		location := candidateLocation(candidate)
 		fingerprint := candidate.Fingerprint
 		if fingerprint == "" {
 			fingerprint = "pending active scan"
 		}
-		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\n", index+1, terminalSafeInline(location), candidate.State,
+		terminalWritef(tw, "%d\t%s\t%s\t%s\t%s\n", index+1, terminalSafeInline(location), terminalSafeInline(string(candidate.State)),
 			terminalSafeInline(shortFingerprint(fingerprint)), relativeTime(candidate.LastSeen))
 	}
 	if len(snapshot.Candidates.Candidates) == 0 {
-		fmt.Fprintln(tw, "-\t(no candidates discovered)\t-\t-\t-")
+		terminalWriteLine(tw, "-\t(no candidates discovered)\t-\t-\t-")
 	}
 	if err := tw.Flush(); err != nil {
 		return err
 	}
 
 	if len(snapshot.Devices.Events) > 0 {
-		fmt.Fprintln(output, "\nRecent events")
+		terminalWriteLine(output, "\nRecent events")
 		start := max(0, len(snapshot.Devices.Events)-6)
 		for _, event := range snapshot.Devices.Events[start:] {
-			fmt.Fprintf(output, "%s  %-16s %-16s %s\n", event.Time.Local().Format("15:04:05"), terminalSafeInline(event.Device), event.State, terminalSafeInline(event.Message))
+			terminalWritef(output, "%s  %-16s %-16s %s\n", event.Time.Local().Format("15:04:05"), terminalSafeInline(event.Device), terminalSafeInline(string(event.State)), terminalSafeInline(event.Message))
 		}
 	}
 	if message != "" {
-		fmt.Fprintf(output, "\n%s\n", terminalSafeInline(message))
+		terminalWritef(output, "\n%s\n", terminalSafeInline(message))
 	}
 	if clear {
-		fmt.Fprintln(output, "\n[a] add candidate  [i] ignore  [p] poll device  [l] clear latch  [r] refresh  [q] quit")
+		terminalWriteLine(output, "\n[a] add candidate  [i] ignore  [p] poll device  [l] clear latch  [r] refresh  [q] quit")
 	}
 	return nil
 }
 
-func enrollCandidateFromTUI(ctx context.Context, output io.Writer, keys <-chan byte, client *http.Client, snapshot candidates.Snapshot) string {
+func enrollCandidateFromTUI(ctx context.Context, output io.Writer, keys <-chan byte, client *http.Client, snapshot candidates.Snapshot, probeTimeout time.Duration) string {
 	if len(snapshot.Candidates) == 0 {
 		return "No discovered candidates to add."
 	}
@@ -269,7 +276,12 @@ func enrollCandidateFromTUI(ctx context.Context, output io.Writer, keys <-chan b
 	if candidate.Fingerprint == "" {
 		return "Candidate has no SSH fingerprint yet; wait for an authorized active scan before enrollment."
 	}
-	fmt.Fprintf(output, "\r\nOn the candidate Mac, run:\r\n  ssh-keygen -lf %s\r\nExpected candidate identity: %s\r\n", candidateHostKeyPath(candidate.KeyType), candidate.Fingerprint)
+	// The fingerprint and key type are network-derived. internal/candidates
+	// already strips control runes at ingestion, but every print site in this
+	// package sanitizes independently so the guarantee does not depend on
+	// another package's ingestion rules.
+	terminalWritef(output, "\r\nOn the candidate Mac, run:\r\n  ssh-keygen -lf %s\r\nExpected candidate identity: %s\r\n",
+		terminalSafeInline(candidateHostKeyPath(candidate.KeyType)), terminalSafeInline(candidate.Fingerprint))
 	verified, err := promptRawLine(output, keys, "Enter the complete fingerprint displayed locally on the Mac")
 	if err != nil {
 		return err.Error()
@@ -330,13 +342,18 @@ func enrollCandidateFromTUI(ctx context.Context, output io.Writer, keys <-chan b
 		Name: name, Host: host, User: user, Port: port, Fingerprint: candidate.Fingerprint,
 		CredentialSource: source, CredentialRef: reference, AutoUnlock: autoUnlock,
 	}
-	requestCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	requestCtx, cancel := context.WithTimeout(ctx, controlEnrollmentTimeout(probeTimeout))
 	defer cancel()
 	var response struct {
-		SchemaVersion int `json:"schema_version"`
+		SchemaVersion int                  `json:"schema_version"`
+		Device        config.Device        `json:"device"`
+		Candidate     candidates.Candidate `json:"candidate"`
 	}
 	endpoint := "/v1/candidates/" + url.PathEscape(candidate.ID) + "/enroll"
 	if err := control.DoJSON(requestCtx, client, http.MethodPost, endpoint, request, &response); err != nil {
+		return "Enrollment failed: " + err.Error()
+	}
+	if err := checkControlSchema(response.SchemaVersion); err != nil {
 		return "Enrollment failed: " + err.Error()
 	}
 	return fmt.Sprintf("Added %s; monitoring starts immediately.", name)
@@ -379,7 +396,7 @@ func candidateActionFromTUI(ctx context.Context, output io.Writer, keys <-chan b
 	return fmt.Sprintf("Candidate %s is now %s.", shortFingerprint(response.Fingerprint), response.State)
 }
 
-func deviceActionFromTUI(ctx context.Context, output io.Writer, keys <-chan byte, client *http.Client, snapshot monitor.Snapshot, action string) string {
+func deviceActionFromTUI(ctx context.Context, output io.Writer, keys <-chan byte, client *http.Client, snapshot monitor.Snapshot, action string, probeTimeout, unlockTimeout time.Duration) string {
 	if len(snapshot.Devices) == 0 {
 		return "No managed devices available."
 	}
@@ -389,14 +406,22 @@ func deviceActionFromTUI(ctx context.Context, output io.Writer, keys <-chan byte
 	}
 	device := snapshot.Devices[index]
 	endpoint := "/v1/devices/" + url.PathEscape(device.Name) + "/" + action
-	requestCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	requestTimeout := 5 * time.Second
+	if action == "poll" {
+		requestTimeout = controlPollTimeout(probeTimeout, unlockTimeout)
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
 	if action == "poll" {
 		var response struct {
-			Device monitor.DeviceSnapshot `json:"device"`
-			Error  string                 `json:"error,omitempty"`
+			SchemaVersion int                    `json:"schema_version"`
+			Device        monitor.DeviceSnapshot `json:"device"`
+			Error         string                 `json:"error,omitempty"`
 		}
 		if err := control.DoJSON(requestCtx, client, http.MethodPost, endpoint, nil, &response); err != nil {
+			return "poll failed: " + err.Error()
+		}
+		if err := checkControlSchema(response.SchemaVersion); err != nil {
 			return "poll failed: " + err.Error()
 		}
 		if response.Error != "" {
@@ -404,8 +429,14 @@ func deviceActionFromTUI(ctx context.Context, output io.Writer, keys <-chan byte
 		}
 		return fmt.Sprintf("Poll completed for %s: %s.", device.Name, response.Device.State)
 	}
-	var response map[string]any
+	var response struct {
+		SchemaVersion int  `json:"schema_version"`
+		Changed       bool `json:"changed"`
+	}
 	if err := control.DoJSON(requestCtx, client, http.MethodPost, endpoint, nil, &response); err != nil {
+		return action + " failed: " + err.Error()
+	}
+	if err := checkControlSchema(response.SchemaVersion); err != nil {
 		return action + " failed: " + err.Error()
 	}
 	return fmt.Sprintf("%s completed for %s.", action, device.Name)
@@ -424,7 +455,10 @@ func promptIndex(output io.Writer, keys <-chan byte, label string, count int) (i
 }
 
 func promptRawLineDefault(output io.Writer, keys <-chan byte, label, defaultValue string) (string, error) {
-	value, err := promptRawLine(output, keys, fmt.Sprintf("%s [%s]", label, defaultValue))
+	// Defaults are candidate-derived (an advertised Bonjour name or hostname),
+	// so the prompt shows a sanitized rendering while the raw value is what the
+	// operator accepts by pressing return.
+	value, err := promptRawLine(output, keys, fmt.Sprintf("%s [%s]", label, terminalSafeInline(defaultValue)))
 	if value == "" {
 		value = defaultValue
 	}
@@ -432,28 +466,28 @@ func promptRawLineDefault(output io.Writer, keys <-chan byte, label, defaultValu
 }
 
 func promptRawLine(output io.Writer, keys <-chan byte, label string) (string, error) {
-	fmt.Fprintf(output, "\r\n%s: \x1b[?25h", label)
+	terminalWritef(output, "\r\n%s: \x1b[?25h", label)
 	var value []rune
-	defer fmt.Fprint(output, "\x1b[?25l")
+	defer terminalWrite(output, "\x1b[?25l")
 	for {
 		key := <-keys
 		switch key {
 		case 3, 27:
-			fmt.Fprint(output, "\r\n")
+			terminalWrite(output, "\r\n")
 			return "", errors.New("cancelled")
 		case '\r', '\n':
-			fmt.Fprint(output, "\r\n")
+			terminalWrite(output, "\r\n")
 			return string(value), nil
 		case 8, 127:
 			if len(value) > 0 {
 				value = value[:len(value)-1]
-				fmt.Fprint(output, "\b \b")
+				terminalWrite(output, "\b \b")
 			}
 		default:
 			r := rune(key)
 			if unicode.IsPrint(r) && len(value) < 4096 {
 				value = append(value, r)
-				fmt.Fprintf(output, "%c", r)
+				terminalWritef(output, "%c", r)
 			}
 		}
 	}

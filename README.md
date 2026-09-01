@@ -315,6 +315,9 @@ Read the [security guide](docs/security.md) for the full design and
 consider [sponsoring @shoon on GitHub](https://github.com/sponsors/shoon).
 Sponsorship helps cover test hardware, code signing, virtual machines, and the
 time required to maintain this project and other security-focused utilities.
+Successful interactive setup and discovery commands may show this link once at
+the end. It is never added to redirected output, JSON, daemon logs, health
+checks, recurring status or unlock output, or one-shot TUI snapshots.
 
 ## License
 

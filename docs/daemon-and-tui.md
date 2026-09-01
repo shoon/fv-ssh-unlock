@@ -353,13 +353,19 @@ API schema version 1 provides:
 | Method and route | Purpose |
 | --- | --- |
 | `GET /v1/health` | Daemon health, version, and start/check timestamps. |
-| `GET /v1/devices` | Managed-device states and recent monitor events. |
-| `GET /v1/candidates` | Candidate-inbox snapshot. |
+| `GET /v1/devices` | Managed-device states, recent monitor events, and configured probe/unlock budgets. |
+| `GET /v1/candidates` | Candidate-inbox snapshot plus dropped-observation and evicted-candidate counters. |
 | `POST /v1/devices/{name}/poll` | Run one immediate policy-controlled poll. This can unlock an eligible locked device. |
 | `POST /v1/devices/{name}/clear-latch` | Acknowledge and clear a failure latch. |
 | `POST /v1/candidates/{id}/ignore` | Permanently ignore a candidate. |
 | `POST /v1/candidates/{id}/restore` | Return an ignored candidate to review. |
 | `POST /v1/candidates/{id}/enroll` | Verify the exact supplied fingerprint, pin it, add the device, and start monitoring. |
+
+The device response exposes `probe_timeout` and `unlock_timeout` as integer
+nanoseconds, matching Go's JSON representation of `time.Duration`. The
+candidate response exposes `dropped_observations` and `evicted_candidates`,
+cumulative for the current daemon process. `tui --json` preserves those same
+fields under its combined `devices` and `candidates` objects.
 
 For example:
 
@@ -426,8 +432,11 @@ provider checks, the daemon, and the TUI with the intended service identity and
 same data directory. A desktop user's keyring, home directory, SSH agent, and
 standard private keys may not be available to a headless service account.
 On Unix, provision an existing service directory as mode `0700`; the program
+also requires it and its private files to be owned by the service identity, and
 will not chmod a shared or group/world-accessible directory on the operator's
-behalf.
+behalf. On Windows, new private directories/files receive a protected DACL;
+existing paths with an untrusted owner or access grant are rejected. Private
+SSH identity files are checked by the same platform-native policy.
 
 ## Current limitations
 

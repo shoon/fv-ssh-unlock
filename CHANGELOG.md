@@ -6,6 +6,63 @@ All notable changes to this project are documented here.
 
 ### Added
 
+- Project-owned Homebrew and Scoop sources for prerelease installation, plus
+  release-built DEB and RPM packages for Linux AMD64 and ARM64.
+- Package CI that builds, inspects, installs, executes, and removes native
+  packages before release.
+- DEB and RPM packages now include the hardened systemd unit with its command
+  path adjusted to the packaged `/usr/bin/fv-ssh-unlock` binary.
+- GitHub CodeQL default setup analyzes Go and GitHub Actions. CI now runs
+  dependency review, golangci-lint across the default and keyring variants,
+  and a Linux Secret Service keyring round trip in addition to the macOS and
+  Windows keyring tests.
+- The local API now reports configured probe/unlock budgets and process-lifetime
+  candidate drop/eviction counters; structured logs expose the corresponding
+  `candidate.dropped` and `candidate.evicted` capacity events.
+- Container author and GitHub Sponsors metadata exposed as OCI labels without
+  adding files or packages to the scratch image.
+
+### Changed
+
+- Bound native releases to the pushed semantic-version tag, exact checkout,
+  GitHub event commit, and `main` ancestry, matching the container release
+  gate, while manual dispatch performs read-only verification without
+  publishing. Container signature verification now tolerates bounded registry
+  referrer propagation without weakening the expected workflow identity.
+- Release builds and CI now resolve the checked-in module graph with
+  `GOWORK=off`, preventing a local workspace dependency from silently changing
+  a shipped build.
+- Pinned the dormant Bonjour dependency's attacker-reachable DNS parser to
+  `github.com/miekg/dns` v1.1.73 instead of its 2019 minimum.
+
+### Fixed
+
+- Daemon probe and unlock timeout flags now reach the SSH layer instead of
+  being silently limited by internal fallback values.
+- Candidate enrollment now commits the verified host key only after device
+  registration, rolls configuration, monitoring, and trust state back together
+  on failure, and no longer blocks unrelated control requests during its SSH
+  probe.
+- Private configuration, candidate, monitor, known-hosts, lock, and identity
+  reads now use no-follow stable opens with native owner/permission validation;
+  application-written state and trust files use atomic replacement. Device
+  mutations reload under a cross-process lock so concurrent daemon and CLI
+  updates cannot silently overwrite each other.
+- A full discovery inbox now evicts only the oldest unreviewed entry, or drops
+  only the new observation when every entry is operator-pinned, rather than
+  failing an entire discovery round. Duplicate Bonjour instance names also no
+  longer hide distinct hosts.
+- Consecutive clean unreachable observations now increase monitor backoff, and
+  a failed one-attempt-marker write emits the error-state event expected by TUI
+  and SIEM consumers.
+- Candidate-derived terminal output is escaped at its print sites, credential
+  and host-key errors preserve their wrapped causes, and CLI validation/help is
+  consistent with the action each command performs.
+
+## [0.2.0-rc.2] - 2026-08-31
+
+### Added
+
 - Public, multi-platform Docker Hub releases at
   `shoonimages/fv-ssh-unlock:<version>`, with automatic semantic-tag
   publication, anonymous-access verification, SPDX SBOM and provenance
@@ -14,10 +71,6 @@ All notable changes to this project are documented here.
 - A canonical logging and SIEM guide covering the JSON event contract,
   severity and sequence semantics, alerting, bounded retention, and external
   Fluent Bit or Vector collection.
-- Project-owned Homebrew and Scoop sources for prerelease installation, plus
-  release-built DEB and RPM packages for Linux AMD64 and ARM64.
-- Package CI that builds, inspects, installs, executes, and removes native
-  packages before release.
 
 ### Changed
 
@@ -32,10 +85,6 @@ All notable changes to this project are documented here.
   `config add` to provision an OS-keyring entry.
 - Corrected `config add` help to state that `--host` and `--user` are required
   and that the positional device name is an optional local alias.
-- Bound native releases to the pushed semantic-version tag, exact checkout,
-  GitHub event commit, and `main` ancestry, matching the container release
-  gate. Container signature verification now tolerates bounded registry
-  referrer propagation without weakening the expected workflow identity.
 
 ## [0.2.0-rc.1] - 2026-08-30
 

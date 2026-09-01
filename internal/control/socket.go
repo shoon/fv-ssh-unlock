@@ -19,6 +19,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/shoon/fv-ssh-unlock/internal/securefs"
 )
 
 const maxResponseSize = 4 << 20
@@ -30,21 +32,8 @@ func Listen(path string) (net.Listener, error) {
 		return nil, fmt.Errorf("control socket path must be absolute")
 	}
 	dir := filepath.Dir(path)
-	info, err := os.Lstat(dir)
-	if os.IsNotExist(err) {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return nil, err
-		}
-		info, err = os.Lstat(dir)
-	}
-	if err != nil {
+	if err := securefs.EnsurePrivateDirectory(dir, "control socket"); err != nil {
 		return nil, err
-	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return nil, fmt.Errorf("control socket directory is not a secure directory: %s", dir)
-	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("control socket directory must not be accessible by group or other users: %s", dir)
 	}
 	if info, err := os.Lstat(path); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 || info.Mode()&os.ModeSocket == 0 {
@@ -130,7 +119,7 @@ func DoJSON(ctx context.Context, client *http.Client, method, endpoint string, s
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		message, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("control API %s: %s: %s", endpoint, resp.Status, message)

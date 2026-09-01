@@ -7,15 +7,15 @@ package main
 import (
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"path/filepath"
-	"runtime"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
+
+	"github.com/shoon/fv-ssh-unlock/internal/securefs"
 )
 
 const maxIdentityFileSize = 1 << 20
@@ -76,6 +76,7 @@ func loadSigners(verbose bool, identityFiles []string) ([]ssh.Signer, error) {
 	// standard keys are not pushed past an SSH server's authentication-attempt
 	// limit by a large agent. Duplicates are removed below.
 	if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
+		// #nosec G704 -- SSH_AUTH_SOCK is the operator's local ssh-agent unix socket; dialing it is the standard agent protocol, not a network fetch of untrusted input.
 		if conn, err := net.DialTimeout("unix", sock, 2*time.Second); err == nil {
 			if s, err := agent.NewClient(conn).Signers(); err == nil {
 				signers = append(signers, s...)
@@ -120,27 +121,9 @@ func discoverDefaultIdentityFiles(home string) []string {
 }
 
 func readIdentityFile(path string) ([]byte, error) {
-	file, err := openStableRegularFileReadOnly(path)
+	data, err := securefs.ReadPrivate(path, "identity", maxIdentityFileSize)
 	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if info.Size() > maxIdentityFileSize {
-		return nil, fmt.Errorf("identity exceeds %d bytes", maxIdentityFileSize)
-	}
-	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("identity permissions %04o are too open; use 0600 or stricter", info.Mode().Perm())
-	}
-	data, err := io.ReadAll(io.LimitReader(file, maxIdentityFileSize+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(data) > maxIdentityFileSize {
-		return nil, fmt.Errorf("identity exceeds %d bytes", maxIdentityFileSize)
+		return nil, fmt.Errorf("read identity: %w", err)
 	}
 	return data, nil
 }

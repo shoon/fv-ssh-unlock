@@ -220,6 +220,53 @@ func TestAttemptMarkerMustPersistBeforeUnlock(t *testing.T) {
 	}
 }
 
+func TestConsecutiveUnreachableObservationsEscalateBackoff(t *testing.T) {
+	ops := &scriptedOps{probes: []probeStep{
+		{result: ProbeResult{State: StateUnreachable}},
+		{result: ProbeResult{State: StateUnreachable}},
+		{result: ProbeResult{State: StateUnreachable}},
+	}}
+	engine := newTestEngine(t, testDevice(false), ops, &memoryStore{}, testOptions())
+	for i := range 3 {
+		if _, err := engine.Poll(context.Background(), "m4alpha"); err != nil {
+			t.Fatalf("Poll %d: %v", i, err)
+		}
+		if got := engine.Snapshot().Devices[0].ConsecutiveFailures; got != i+1 {
+			t.Fatalf("after %d unreachable observations consecutive failures = %d, want %d", i+1, got, i+1)
+		}
+	}
+	// A definitive observation clears the escalation again.
+	ops.probes = []probeStep{{result: ProbeResult{State: StateBooted}}}
+	if _, err := engine.Poll(context.Background(), "m4alpha"); err != nil {
+		t.Fatal(err)
+	}
+	if got := engine.Snapshot().Devices[0].ConsecutiveFailures; got != 0 {
+		t.Fatalf("consecutive failures = %d after a reachable observation, want 0", got)
+	}
+}
+
+func TestFailedAttemptMarkerEmitsStateChange(t *testing.T) {
+	store := &memoryStore{failAt: 2} // probe state saves first; attempt marker saves second
+	ops := &scriptedOps{probes: []probeStep{{result: ProbeResult{State: StateLocked}}}}
+	engine := newTestEngine(t, testDevice(true), ops, store, testOptions())
+	if _, err := engine.Poll(context.Background(), "m4alpha"); err == nil {
+		t.Fatal("expected attempt persistence error")
+	}
+	snapshot := engine.Snapshot()
+	if snapshot.Devices[0].State != StateError {
+		t.Fatalf("state = %s, want %s", snapshot.Devices[0].State, StateError)
+	}
+	found := false
+	for _, event := range snapshot.Events {
+		if event.Type == EventStateChanged && strings.Contains(event.Message, "persist unlock attempt") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no state-changed event for the failed attempt marker: %+v", snapshot.Events)
+	}
+}
+
 func TestCooldownAndAttemptSurviveRestart(t *testing.T) {
 	store := &memoryStore{}
 	opts := testOptions()

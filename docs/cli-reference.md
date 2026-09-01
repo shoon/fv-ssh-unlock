@@ -11,6 +11,12 @@ fv-ssh-unlock unlock --help
 fv-ssh-unlock completion powershell --help
 ```
 
+After a successful interactive setup, discovery, scan, provider report, or TUI
+session, the CLI may print one short GitHub Sponsors link. The footer is shown
+only when standard output is a terminal. It is excluded from redirected output,
+JSON, daemon logs, health checks, status and unlock commands, and one-shot TUI
+snapshots.
+
 ## Top-level commands
 
 | Command | Purpose |
@@ -170,7 +176,8 @@ fv-ssh-unlock status [name...] [flags]
 `status` never loads or sends the FileVault password. Without `--identity`, it
 tries keys from `ssh-agent` and regular standard identity files such as
 `~/.ssh/id_ed25519` and `~/.ssh/id_rsa`. An explicit identity must be
-unencrypted; add encrypted identities to `ssh-agent` instead.
+unencrypted and pass the platform private-owner/permission check; add encrypted
+identities to `ssh-agent` instead.
 
 ## `unlock`
 

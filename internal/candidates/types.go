@@ -36,6 +36,8 @@ const (
 	EventIgnored           EventType = "ignored"
 	EventRestored          EventType = "restored"
 	EventExpired           EventType = "expired"
+	EventEvicted           EventType = "evicted"
+	EventDropped           EventType = "dropped"
 	EventConfiguredChanged EventType = "configured_changed"
 )
 
@@ -101,21 +103,30 @@ type ConfiguredFingerprint struct {
 	DeviceNames []string `json:"device_names"`
 }
 
-// IngestResult reports the candidate produced by an observation.
+// IngestResult reports the candidate produced by an observation. EvictedIDs
+// identifies unreviewed candidates displaced to make room. A non-nil
+// DroppedObservation marks a host that matched no existing candidate and could
+// not create one because the inbox was full of operator-reviewed entries;
+// Candidate is then zero and the rest of the round is still applied.
 type IngestResult struct {
-	Candidate Candidate `json:"candidate"`
-	Created   bool      `json:"created"`
-	MergedIDs []string  `json:"merged_ids,omitempty"`
+	Candidate          Candidate    `json:"candidate"`
+	Created            bool         `json:"created"`
+	DroppedObservation *Observation `json:"dropped_observation,omitempty"`
+	EvictedIDs         []string     `json:"evicted_ids,omitempty"`
+	MergedIDs          []string     `json:"merged_ids,omitempty"`
 }
 
 // Snapshot is a consistent point-in-time view suitable for a TUI or JSON API.
 type Snapshot struct {
-	Sequence   uint64      `json:"sequence"`
-	Generated  time.Time   `json:"generated_at"`
-	Candidates []Candidate `json:"candidates"`
+	Sequence            uint64      `json:"sequence"`
+	Generated           time.Time   `json:"generated_at"`
+	DroppedObservations uint64      `json:"dropped_observations"`
+	EvictedCandidates   uint64      `json:"evicted_candidates"`
+	Candidates          []Candidate `json:"candidates"`
 }
 
-// Event is a change notification. Candidate is omitted for expiration events.
+// Event is a change notification. Candidate is omitted for expiration,
+// eviction, and capacity-drop events.
 type Event struct {
 	Sequence    uint64     `json:"sequence"`
 	At          time.Time  `json:"at"`

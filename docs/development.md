@@ -27,7 +27,7 @@ SSH server, and known platform limitations.
 | `internal/control` | Local HTTP transport restricted to a permission-controlled Unix socket. |
 | `tools/mock-fv-ssh-server` | Separate development-only mock server module. |
 | `testdata` | Redacted protocol fixtures used by tests. |
-| `.github/workflows` | CI, CodeQL, dependency review, and release automation. |
+| `.github/workflows` | CI, dependency review, and release automation. |
 | `docs` | User and developer documentation. |
 
 The root `go.work` connects the main module and mock-server module for local

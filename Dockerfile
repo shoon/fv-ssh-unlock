@@ -27,11 +27,13 @@ ARG REVISION=unknown
 ARG CREATED=unknown
 LABEL org.opencontainers.image.title="fv-ssh-unlock" \
       org.opencontainers.image.description="Monitor and unlock FileVault-protected Macs over SSH" \
+      org.opencontainers.image.authors="Shaun Murphy (@shoon)" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.source="https://github.com/shoon/fv-ssh-unlock" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${REVISION}" \
-      org.opencontainers.image.created="${CREATED}"
+      org.opencontainers.image.created="${CREATED}" \
+      io.github.shoon.sponsors="https://github.com/sponsors/shoon"
 
 COPY --from=build /out/ /
 

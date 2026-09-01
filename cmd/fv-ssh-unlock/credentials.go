@@ -24,9 +24,10 @@ func newCredentialsCommand() *cobra.Command {
 	}
 
 	providersCmd := &cobra.Command{
-		Use:   "providers",
-		Short: "Report credential providers available on this machine",
-		Args:  cobra.NoArgs,
+		Use:         "providers",
+		Short:       "Report credential providers available on this machine",
+		Args:        cobra.NoArgs,
+		Annotations: map[string]string{sponsorFooterAnnotation: sponsorFooterHuman},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			registry := credentials.NewRegistry(credentials.Options{})
 			reports := registry.Reports()

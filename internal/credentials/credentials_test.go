@@ -8,13 +8,13 @@
 package credentials
 
 import (
-	"os"
+	"errors"
 	"strings"
 	"testing"
 )
 
 func TestGetEnvCredential(t *testing.T) {
-	os.Setenv("FV_UNLOCK_PASSWORD_TESTDEVICE", "supersecret")
+	t.Setenv("FV_UNLOCK_PASSWORD_TESTDEVICE", "supersecret")
 	pw, err := Get("testdevice")
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
@@ -25,7 +25,7 @@ func TestGetEnvCredential(t *testing.T) {
 }
 
 func TestGetEnvCredentialNotSet(t *testing.T) {
-	os.Unsetenv("FV_UNLOCK_PASSWORD_NODEVICE")
+	t.Setenv("FV_UNLOCK_PASSWORD_NODEVICE", "")
 	_, err := Get("nodevice")
 	if err == nil || !strings.Contains(err.Error(), "FV_UNLOCK_PASSWORD_NODEVICE") {
 		t.Fatalf("expected error for missing env var, got %v", err)
@@ -41,5 +41,34 @@ func TestEnvName(t *testing.T) {
 func TestEnvNameCanonicalCollisionIsVisible(t *testing.T) {
 	if EnvName(ID("my-mac")) != EnvName(ID("my_mac")) {
 		t.Fatalf("expected normalized names to collide so config validation can reject them")
+	}
+}
+
+func TestDisabledKeyringMutationMethods(t *testing.T) {
+	if CanStore() {
+		t.Fatal("non-keyring build reported persistent storage")
+	}
+	if err := Set("device", "secret"); err == nil {
+		t.Fatal("Set unexpectedly succeeded without keyring support")
+	}
+	if err := Delete("device"); err == nil {
+		t.Fatal("Delete unexpectedly succeeded without keyring support")
+	}
+	provider, err := NewRegistry(Options{}).Provider(ProviderKeyring)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.Get("device"); !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("keyring Get error = %v, want ErrProviderUnavailable", err)
+	}
+	if err := provider.Store("device", "secret"); !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("keyring Store error = %v, want ErrProviderUnavailable", err)
+	}
+	if err := provider.Delete("device"); !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("keyring Delete error = %v, want ErrProviderUnavailable", err)
+	}
+	assessment := provider.Assess("device")
+	if assessment.Available || assessment.Secure || assessment.Details == "" {
+		t.Fatalf("disabled keyring assessment = %+v", assessment)
 	}
 }

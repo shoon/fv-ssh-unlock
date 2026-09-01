@@ -8,7 +8,11 @@ package credentials
 
 import "os"
 
-func platformSecureCredentialFile(string, os.FileInfo) (bool, string) {
+func platformSecureCredentialFile(string, *os.File, os.FileInfo) (bool, string) {
+	return false, ""
+}
+
+func platformMemoryBackedCredentialFile(*os.File) (bool, string) {
 	return false, ""
 }
 

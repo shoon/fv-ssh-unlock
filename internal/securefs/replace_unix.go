@@ -4,14 +4,16 @@
 //
 // Copyright 2025-2026 Shaun Murphy
 
-package candidates
+package securefs
 
 import (
 	"os"
 	"path/filepath"
 )
 
-func replaceFile(oldPath, newPath string) error {
+// ReplaceFile renames oldPath over newPath and flushes the containing directory
+// so the rename itself survives a crash.
+func ReplaceFile(oldPath, newPath string) error {
 	if err := os.Rename(oldPath, newPath); err != nil {
 		return err
 	}
@@ -19,6 +21,6 @@ func replaceFile(oldPath, newPath string) error {
 	if err != nil {
 		return err
 	}
-	defer directory.Close()
+	defer func() { _ = directory.Close() }()
 	return directory.Sync()
 }

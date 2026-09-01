@@ -16,9 +16,12 @@ import (
 )
 
 func TestLogSafeInlineEscapesControlAndFormattingCharacters(t *testing.T) {
-	got := logSafeInline("host\r\nspoof\x1b]52;c;value\a\u202e")
+	got := logSafeInline("host\r\nspoof\x1b]52;c;value\a\u202e\U000E0001")
 	if strings.ContainsAny(got, "\r\n\x1b\a") || strings.ContainsRune(got, '\u202e') {
 		t.Fatalf("logSafeInline retained a control or formatting character: %q", got)
+	}
+	if !strings.Contains(got, `\U000E0001`) {
+		t.Fatalf("non-BMP formatting character was not escaped: %q", got)
 	}
 }
 
@@ -157,14 +160,14 @@ func TestAnalyzePromptEofIsNotSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	go func() {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
 				return
 			}
-			conn.Close()
+			_ = conn.Close()
 		}
 	}()
 
@@ -216,7 +219,7 @@ func TestAnalyzePromptConnectionRefused(t *testing.T) {
 		t.Fatalf("listen: %v", err)
 	}
 	addr := ln.Addr().String()
-	ln.Close()
+	_ = ln.Close()
 
 	c := newClient(ssh.FixedHostKey(mustHostKey(t)))
 	_, _, err = c.AnalyzePrompt(context.Background(), addr, "user", "pw", "")

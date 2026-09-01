@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -94,8 +95,9 @@ func TestFileStoreRejectsSymlinkAndInsecurePermissions(t *testing.T) {
 
 func TestFileStoreRejectsTrailingOrUnknownData(t *testing.T) {
 	for name, content := range map[string]string{
-		"trailing": `{\"version\":1,\"devices\":{}} {}`,
-		"unknown":  `{\"version\":1,\"devices\":{},\"surprise\":true}`,
+		"trailing":           `{"version":1,"devices":{}} {}`,
+		"trailing malformed": `{"version":1,"devices":{}} x`,
+		"unknown":            `{"version":1,"devices":{},"surprise":true}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "state.json")
@@ -109,6 +111,63 @@ func TestFileStoreRejectsTrailingOrUnknownData(t *testing.T) {
 	}
 }
 
+func TestFileStorePathDefaultsAndVersionValidation(t *testing.T) {
+	for name, store := range map[string]*FileStore{
+		"nil":   nil,
+		"empty": {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := store.Load(); err == nil {
+				t.Fatal("Load accepted a missing state path")
+			}
+			if err := store.Save(PersistentState{}); err == nil {
+				t.Fatal("Save accepted a missing state path")
+			}
+		})
+	}
+
+	path := filepath.Join(t.TempDir(), "private", "state.json")
+	store := &FileStore{Path: path}
+	missing, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if missing.Version != persistentStateVersion || missing.Devices == nil || len(missing.Devices) != 0 {
+		t.Fatalf("missing store defaults = %+v", missing)
+	}
+	if err := store.Save(PersistentState{Version: persistentStateVersion + 1}); err == nil {
+		t.Fatal("unsupported state version was saved")
+	}
+	if err := store.Save(PersistentState{}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Version != persistentStateVersion || loaded.Devices == nil {
+		t.Fatalf("zero state was not normalized: %+v", loaded)
+	}
+}
+
+func TestFileStoreRejectsOversizedState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(maxStateSize + 1); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&FileStore{Path: path}).Load(); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized state was accepted: %v", err)
+	}
+}
+
 func TestSnapshotJSONOmitsZeroTimestamps(t *testing.T) {
 	payload, err := json.Marshal(DeviceSnapshot{
 		Device:       Device{Name: "mac", Host: "192.0.2.10", User: "user"},
@@ -119,5 +178,34 @@ func TestSnapshotJSONOmitsZeroTimestamps(t *testing.T) {
 	}
 	if bytes.Contains(payload, []byte("0001-01-01")) || bytes.Contains(payload, []byte("last_checked_at")) {
 		t.Fatalf("zero timestamps leaked into operator JSON: %s", payload)
+	}
+}
+
+// The stable-open idiom must be exercised through the opened descriptor rather
+// than an Lstat taken before the open, so a swap between the check and the read
+// cannot redirect Load to another file.
+func TestFileStoreLoadValidatesOpenedDescriptor(t *testing.T) {
+	dir := t.TempDir()
+	directoryPath := filepath.Join(dir, "state-dir.json")
+	if err := os.Mkdir(directoryPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&FileStore{Path: directoryPath}).Load(); err == nil {
+		t.Fatal("Load accepted a directory")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks requires additional privileges on Windows")
+	}
+	target := filepath.Join(dir, "target.json")
+	if err := os.WriteFile(target, []byte(`{"version":1,"devices":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "state.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	_, err := (&FileStore{Path: link}).Load()
+	if err == nil || !strings.Contains(err.Error(), "stable regular file") {
+		t.Fatalf("Load accepted a symlink: %v", err)
 	}
 }

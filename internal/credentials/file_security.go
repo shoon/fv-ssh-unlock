@@ -21,11 +21,21 @@ func assessCredentialFile(path string) ReferenceAssessment {
 
 func assessCredentialPath(path string) ReferenceAssessment {
 	clean := filepath.Clean(path)
-	info, err := os.Lstat(clean)
+	file, err := openStableCredentialFile(clean)
 	if err != nil {
 		return ReferenceAssessment{Details: err.Error()}
 	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+	defer func() { _ = file.Close() }()
+	return assessCredentialHandle(clean, file)
+}
+
+func assessCredentialHandle(path string, file *os.File) ReferenceAssessment {
+	clean := filepath.Clean(path)
+	info, err := file.Stat()
+	if err != nil {
+		return ReferenceAssessment{Details: err.Error()}
+	}
+	if !info.Mode().IsRegular() {
 		return ReferenceAssessment{Details: "credential path is not a regular, non-symbolic-link file"}
 	}
 	if info.Size() > maxCredentialFileSize {
@@ -34,14 +44,16 @@ func assessCredentialPath(path string) ReferenceAssessment {
 
 	if directory := os.Getenv("CREDENTIALS_DIRECTORY"); directory != "" && pathWithin(directory, clean) {
 		if secure, detail := platformSecureCredentialDirectory(directory); secure {
-			return ReferenceAssessment{
-				Available: true,
-				Secure:    true,
-				Details:   "file is inside the systemd service credential directory; " + detail,
+			if fileSecure, fileDetail := platformMemoryBackedCredentialFile(file); fileSecure {
+				return ReferenceAssessment{
+					Available: true,
+					Secure:    true,
+					Details:   "file is inside the systemd service credential directory; " + detail + "; " + fileDetail,
+				}
 			}
 		}
 	}
-	if secure, detail := platformSecureCredentialFile(clean, info); secure {
+	if secure, detail := platformSecureCredentialFile(clean, file, info); secure {
 		return ReferenceAssessment{Available: true, Secure: true, Details: detail}
 	}
 	return ReferenceAssessment{
@@ -87,12 +99,19 @@ func secureCredentialFileIn(directory string) (bool, string) {
 			continue
 		}
 		path := filepath.Join(directory, entry.Name())
-		info, err := entry.Info()
-		if err != nil || !info.Mode().IsRegular() {
+		file, err := openStableCredentialFile(path)
+		if err != nil {
 			continue
 		}
-		if secure, detail := platformSecureCredentialFile(path, info); secure {
-			return true, detail
+		info, statErr := file.Stat()
+		if statErr == nil {
+			if secure, detail := platformSecureCredentialFile(path, file, info); secure {
+				_ = file.Close()
+				return true, detail
+			}
+		}
+		if err := file.Close(); err != nil {
+			continue
 		}
 	}
 	return false, ""

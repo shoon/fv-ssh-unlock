@@ -5,15 +5,21 @@
 package config
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/shoon/fv-ssh-unlock/internal/credentials"
+	"github.com/shoon/fv-ssh-unlock/internal/securefs"
 )
 
 func TestConfigAddRemoveList(t *testing.T) {
@@ -101,6 +107,44 @@ func TestValidateDeviceRejectsAmbiguousOrUnsafeValues(t *testing.T) {
 	}
 }
 
+func TestValidateDevicesEnforcesInventoryConstraints(t *testing.T) {
+	valid := Device{Name: "one", Host: "one.example", User: "user", Port: 22, Cred: credentials.ID("one")}
+	if err := ValidateDevices([]Device{valid}); err != nil {
+		t.Fatalf("valid inventory rejected: %v", err)
+	}
+
+	duplicate := valid
+	duplicate.Host = "two.example"
+	if err := ValidateDevices([]Device{valid, duplicate}); err == nil || !strings.Contains(err.Error(), "duplicate device name") {
+		t.Fatalf("duplicate inventory error = %v", err)
+	}
+
+	collision := Device{Name: "one_", Host: "two.example", User: "user", Port: 22, Cred: credentials.ID("one_")}
+	first := Device{Name: "one-", Host: "one.example", User: "user", Port: 22, Cred: credentials.ID("one-")}
+	if err := ValidateDevices([]Device{first, collision}); err == nil || !strings.Contains(err.Error(), "share credential environment variable") {
+		t.Fatalf("credential environment collision error = %v", err)
+	}
+}
+
+func TestValidateDeviceRejectsRemainingInvalidFields(t *testing.T) {
+	base := Device{Name: "one", Host: "one.example", User: "user", Port: 22, Cred: credentials.ID("one")}
+	mutations := []func(*Device){
+		func(d *Device) { d.Port = -1 },
+		func(d *Device) { d.CredentialSource = "unknown" },
+		func(d *Device) { d.SuccessMessage = "bad\x00message" },
+		func(d *Device) { d.SuccessMessage = strings.Repeat("x", 4097) },
+		func(d *Device) { d.MACAddress = " bad" },
+		func(d *Device) { d.Cred = "bad\ncredential" },
+	}
+	for index, mutate := range mutations {
+		device := base
+		mutate(&device)
+		if err := ValidateDevice(device); err == nil {
+			t.Errorf("mutation %d was accepted: %+v", index, device)
+		}
+	}
+}
+
 func TestValidateDeviceRejectsRuntimeCredentialForAutomaticUnlock(t *testing.T) {
 	device := Device{
 		Name:             "mac",
@@ -134,7 +178,7 @@ func TestLoadRejectsOversizedConfiguration(t *testing.T) {
 	if err := f.Truncate(maxConfigSize + 1); err != nil {
 		t.Fatal(err)
 	}
-	f.Close()
+	_ = f.Close()
 	if _, err := (&Store{Path: path}).Load(); err == nil {
 		t.Fatalf("expected oversized configuration to be rejected")
 	}
@@ -152,6 +196,98 @@ func TestAddDuplicate(t *testing.T) {
 	// second add should error
 	if err := s.Add(d1); err == nil {
 		t.Fatalf("expected error when adding duplicate, got nil")
+	}
+}
+
+func TestAddPreparedRunsOnlyForTheWinningConcurrentAdd(t *testing.T) {
+	path := filepath.Join(privateConfigTestDir(t), "devices.json")
+	device := Device{Name: "shared", Host: "192.0.2.1", User: "user", Port: 22, Cred: credentials.ID("shared")}
+	stores := []*Store{{Path: path}, {Path: path}}
+	start := make(chan struct{})
+	errs := make(chan error, len(stores))
+	var preparations atomic.Int32
+	for _, store := range stores {
+		go func() {
+			<-start
+			errs <- store.AddPrepared(device, func() error {
+				preparations.Add(1)
+				time.Sleep(25 * time.Millisecond)
+				return nil
+			})
+		}()
+	}
+	close(start)
+
+	succeeded, failed := 0, 0
+	for range stores {
+		if err := <-errs; err != nil {
+			failed++
+		} else {
+			succeeded++
+		}
+	}
+	if succeeded != 1 || failed != 1 {
+		t.Fatalf("concurrent adds succeeded=%d failed=%d, want one of each", succeeded, failed)
+	}
+	if got := preparations.Load(); got != 1 {
+		t.Fatalf("external state prepared %d times, want once", got)
+	}
+	devices, err := stores[0].Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(devices) != 1 || devices[0] != device {
+		t.Fatalf("stored devices = %+v, want only %+v", devices, device)
+	}
+}
+
+func TestAddPreparedFailureLeavesConfigurationUnchanged(t *testing.T) {
+	store := &Store{Path: filepath.Join(privateConfigTestDir(t), "devices.json")}
+	wantErr := errors.New("keyring unavailable")
+	device := Device{Name: "mac", Host: "192.0.2.1", User: "user", Port: 22, Cred: credentials.ID("mac")}
+	err := store.AddPrepared(device, func() error { return wantErr })
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("AddPrepared() error = %v, want %v", err, wantErr)
+	}
+	devices, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(devices) != 0 {
+		t.Fatalf("failed preparation stored devices: %+v", devices)
+	}
+}
+
+func TestAddPreparedValidatesBeforePreparingExternalState(t *testing.T) {
+	store := &Store{Path: filepath.Join(privateConfigTestDir(t), "devices.json")}
+	prepared := false
+	invalid := Device{Name: "mac", Host: "192.0.2.1", User: "user", Port: 22, Cred: "wrong-id"}
+	if err := store.AddPrepared(invalid, func() error {
+		prepared = true
+		return nil
+	}); err == nil {
+		t.Fatal("invalid device was accepted")
+	}
+	if prepared {
+		t.Fatal("external state was prepared before validation")
+	}
+}
+
+func TestAddContextCancelsWhileWaitingForAnotherProcessLock(t *testing.T) {
+	if runtime.GOOS != "windows" && runtime.GOOS != "linux" && runtime.GOOS != "darwin" && runtime.GOOS != "freebsd" && runtime.GOOS != "openbsd" && runtime.GOOS != "netbsd" && runtime.GOOS != "dragonfly" && runtime.GOOS != "aix" && runtime.GOOS != "solaris" {
+		t.Skip("platform does not provide a cross-process file lock")
+	}
+	store := &Store{Path: filepath.Join(privateConfigTestDir(t), "devices.json")}
+	lock, err := securefs.AcquireLock(store.lockPath(), "configuration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Release()
+	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
+	defer cancel()
+	device := Device{Name: "mac", Host: "192.0.2.1", User: "user", Port: 22, Cred: credentials.ID("mac")}
+	if err := store.AddContext(ctx, device); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("AddContext() error = %v, want context deadline exceeded", err)
 	}
 }
 
@@ -221,6 +357,35 @@ func TestRemoveNotFound(t *testing.T) {
 	// attempt to remove missing device
 	if err := s.Remove("nope"); err == nil {
 		t.Fatalf("expected error when removing non-existent device, got nil")
+	}
+}
+
+func TestRemoveIfUnchangedPreservesAReplacement(t *testing.T) {
+	store := &Store{Path: filepath.Join(privateConfigTestDir(t), "devices.json")}
+	original := Device{Name: "mac", Host: "192.0.2.1", User: "user", Port: 22, Cred: credentials.ID("mac")}
+	if err := store.Add(original); err != nil {
+		t.Fatal(err)
+	}
+	replacement := original
+	replacement.Host = "192.0.2.2"
+	if err := store.Update(replacement); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RemoveIfUnchangedContext(context.Background(), original); !errors.Is(err, ErrDeviceChanged) {
+		t.Fatalf("conditional remove error = %v, want ErrDeviceChanged", err)
+	}
+	devices, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(devices) != 1 || devices[0] != replacement {
+		t.Fatalf("conditional rollback removed replacement: %+v", devices)
+	}
+	if err := store.RemoveIfUnchangedContext(context.Background(), replacement); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RemoveIfUnchangedContext(context.Background(), replacement); err != nil {
+		t.Fatalf("idempotent conditional remove = %v", err)
 	}
 }
 
@@ -316,6 +481,16 @@ func TestLoadRejectsUnknownFields(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsTrailingData(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "devices.json")
+	if err := os.WriteFile(path, []byte("[] {}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&Store{Path: path}).Load(); err == nil || !strings.Contains(err.Error(), "trailing data") {
+		t.Fatalf("trailing configuration was accepted: %v", err)
+	}
+}
+
 func TestLoadRejectsSymlink(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("creating symlinks requires additional privileges on Windows")
@@ -331,5 +506,72 @@ func TestLoadRejectsSymlink(t *testing.T) {
 	}
 	if _, err := (&Store{Path: link}).Load(); err == nil {
 		t.Fatal("expected symlinked configuration to be rejected")
+	}
+}
+
+func TestLoadRejectsInsecurePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows DACL coverage is in securefs Windows-specific tests")
+	}
+	path := filepath.Join(t.TempDir(), "devices.json")
+	if err := os.WriteFile(path, []byte("[]"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&Store{Path: path}).Load(); err == nil || !strings.Contains(err.Error(), "insecure configuration") {
+		t.Fatalf("Load accepted insecure configuration permissions: %v", err)
+	}
+}
+
+const (
+	helperPathEnv = "FV_SSH_UNLOCK_TEST_CONFIG_PATH"
+	helperNameEnv = "FV_SSH_UNLOCK_TEST_DEVICE_NAME"
+	helperWriters = 6
+)
+
+// TestConcurrentProcessesDoNotLoseDevices exercises the cross-process lock: the
+// daemon and the CLI run in separate processes, so an in-process mutex alone
+// would let one load-modify-save cycle overwrite the other's device.
+func TestConcurrentProcessesDoNotLoseDevices(t *testing.T) {
+	path := filepath.Join(privateConfigTestDir(t), "devices.json")
+	var wg sync.WaitGroup
+	errs := make(chan error, helperWriters)
+	for index := range helperWriters {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			name := fmt.Sprintf("proc-%02d", index)
+			command := exec.Command(os.Args[0], "-test.run=TestConfigAddHelperProcess", "-test.v")
+			command.Env = append(os.Environ(), helperPathEnv+"="+path, helperNameEnv+"="+name)
+			if output, err := command.CombinedOutput(); err != nil {
+				errs <- fmt.Errorf("%s: %w: %s", name, err, output)
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	devices, err := (&Store{Path: path}).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(devices) != helperWriters {
+		t.Fatalf("concurrent processes retained %d devices, want %d: %+v", len(devices), helperWriters, devices)
+	}
+}
+
+// TestConfigAddHelperProcess is the child half of
+// TestConcurrentProcessesDoNotLoseDevices and is inert in a normal test run.
+func TestConfigAddHelperProcess(t *testing.T) {
+	path := os.Getenv(helperPathEnv)
+	name := os.Getenv(helperNameEnv)
+	if path == "" || name == "" {
+		t.Skip("helper process is driven by TestConcurrentProcessesDoNotLoseDevices")
+	}
+	store := &Store{Path: path}
+	device := Device{Name: name, Host: "192.0.2.1", User: "user", Port: 22, Cred: credentials.ID(name)}
+	if err := store.Add(device); err != nil {
+		t.Fatalf("helper add %s: %v", name, err)
 	}
 }

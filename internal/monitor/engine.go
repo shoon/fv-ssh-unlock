@@ -267,6 +267,7 @@ func (e *Engine) applyProbe(managed *managedDevice, result ProbeResult, probeErr
 	wasLatched := managed.record.Latched
 	firstObservation := !managed.observed
 	observationProduced := false
+	var invalidStateErr error
 	record := &managed.record
 	record.LastCheckedAt = now
 	record.Detail = boundedText(result.Detail)
@@ -299,14 +300,19 @@ func (e *Engine) applyProbe(managed *managedDevice, result ProbeResult, probeErr
 			record.State = StateError
 		}
 	} else if !validProbeState(result.State) {
-		probeErr = fmt.Errorf("prober returned invalid state %q", result.State)
+		invalidStateErr = fmt.Errorf("prober returned invalid state %q", result.State)
 		record.State = StateError
 		record.ConsecutiveFailures++
-		record.LastError = probeErr.Error()
+		record.LastError = invalidStateErr.Error()
 	} else {
 		observationProduced = true
 		record.LastObservation = result.State
-		record.ConsecutiveFailures = 0
+		// An error-free unreachable observation is still a failed contact, so
+		// it must escalate the backoff instead of resetting the counter the
+		// arm below would immediately set back to one.
+		if result.State != StateUnreachable {
+			record.ConsecutiveFailures = 0
+		}
 		switch result.State {
 		case StateBooted:
 			record.State = StateBooted
@@ -361,7 +367,7 @@ func (e *Engine) applyProbe(managed *managedDevice, result ProbeResult, probeErr
 	}
 	shouldUnlock := probeErr == nil && result.State == StateLocked && managed.device.AutoUnlock &&
 		!record.Latched && !record.UnlockAttempted && !now.Before(record.NextUnlockEligibleAt)
-	return shouldUnlock, nil
+	return shouldUnlock, invalidStateErr
 }
 
 func stateForLatch(kind FailureKind) State {
@@ -414,7 +420,11 @@ func (e *Engine) markUnlockStarted(managed *managedDevice) (bool, error) {
 	if err := e.persistLocked(); err != nil {
 		// Never release a credential if the attempt marker was not durable.
 		record.State = StateError
+		record.StateChangedAt = now
 		record.LastError = boundedText(fmt.Sprintf("persist unlock attempt: %v", err))
+		// Emit the transition like every other one: a SIEM or TUI consumer must
+		// not miss a device dropping into the error state.
+		e.emitLocked(EventStateChanged, managed.device.Name, stateEventMessage(record))
 		return false, fmt.Errorf("persist unlock attempt: %w", err)
 	}
 	e.emitLocked(EventUnlockStarted, managed.device.Name, "automatic unlock authorized after definitive FileVault detection")
@@ -429,6 +439,7 @@ func (e *Engine) applyUnlockResult(managed *managedDevice, result UnlockResult, 
 	before := record.State
 	record.Detail = boundedText(result.Detail)
 	record.LastError = ""
+	var contractErr error
 	if unlockErr != nil {
 		record.LastError = boundedText(unlockErr.Error())
 	}
@@ -459,7 +470,8 @@ func (e *Engine) applyUnlockResult(managed *managedDevice, result UnlockResult, 
 		e.markPreSubmissionRetryLocked(record, now)
 	default:
 		record.State = StateError
-		record.LastError = "unlocker returned neither acceptance nor an error"
+		contractErr = errors.New("unlocker returned neither acceptance nor an error")
+		record.LastError = contractErr.Error()
 	}
 	if record.State != before {
 		record.StateChangedAt = now
@@ -478,7 +490,7 @@ func (e *Engine) applyUnlockResult(managed *managedDevice, result UnlockResult, 
 	if record.Latched {
 		e.emitLocked(EventLatchChanged, managed.device.Name, record.LatchReason)
 	}
-	return nil
+	return contractErr
 }
 
 func stateEventMessage(record *DeviceRecord) string {
@@ -519,7 +531,7 @@ func (e *Engine) ClearLatch(name string) error {
 	defer managed.opMu.Unlock()
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if !managed.record.Latched && !(managed.record.LockEpisodeOpen && managed.record.UnlockAttempted) {
+	if !managed.record.Latched && (!managed.record.LockEpisodeOpen || !managed.record.UnlockAttempted) {
 		return nil
 	}
 	previous := managed.record

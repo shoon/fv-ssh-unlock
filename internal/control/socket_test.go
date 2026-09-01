@@ -4,6 +4,7 @@ package control
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -38,7 +39,7 @@ func TestListenAndGetJSON(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"ok":true}`)
 	})}
-	go server.Serve(listener)
+	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(func() {
 		_ = server.Shutdown(context.Background())
 		_ = listener.Close()
@@ -97,7 +98,7 @@ func TestListenRefusesLiveSocketWithoutUnlinkingIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer first.Close()
+	defer func() { _ = first.Close() }()
 	if second, err := Listen(path); err == nil {
 		_ = second.Close()
 		t.Fatal("second listener replaced an active control socket")
@@ -164,6 +165,114 @@ func TestDoJSONRejectsOversizedAndTrailingResponses(t *testing.T) {
 				t.Fatal("expected malformed response to be rejected")
 			}
 		})
+	}
+}
+
+func TestClientUsesOnlyUnixSocketTransport(t *testing.T) {
+	client := Client("/private/test/control.sock", 3*time.Second)
+	if client.Timeout != 3*time.Second {
+		t.Fatalf("client timeout = %s", client.Timeout)
+	}
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok || !transport.DisableKeepAlives || transport.DialContext == nil {
+		t.Fatalf("unexpected control transport: %#v", client.Transport)
+	}
+}
+
+func TestDoJSONEncodesRequestsAndHandlesStatusErrors(t *testing.T) {
+	t.Run("request", func(t *testing.T) {
+		client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			if request.Method != http.MethodPost || request.URL.Path != "/v1/test" {
+				t.Fatalf("unexpected request: %s %s", request.Method, request.URL.Path)
+			}
+			if request.Header.Get("Content-Type") != "application/json" {
+				t.Fatalf("content type = %q", request.Header.Get("Content-Type"))
+			}
+			body, err := io.ReadAll(request.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(body) != "{\"message\":\"\\u003ctag\\u003e\"}\n" {
+				t.Fatalf("encoded body = %q", body)
+			}
+			return &http.Response{StatusCode: http.StatusNoContent, Status: "204 No Content", Body: io.NopCloser(strings.NewReader(""))}, nil
+		})}
+		if err := DoJSON(context.Background(), client, http.MethodPost, "/v1/test", map[string]string{"message": "<tag>"}, nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("status", func(t *testing.T) {
+		client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusConflict,
+				Status:     "409 Conflict",
+				Body:       io.NopCloser(strings.NewReader("already exists")),
+			}, nil
+		})}
+		err := GetJSON(context.Background(), client, "/v1/test", &struct{}{})
+		if err == nil || !strings.Contains(err.Error(), "409 Conflict") || !strings.Contains(err.Error(), "already exists") {
+			t.Fatalf("status error = %v", err)
+		}
+	})
+
+	t.Run("transport", func(t *testing.T) {
+		want := errors.New("transport unavailable")
+		client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, want
+		})}
+		if err := GetJSON(context.Background(), client, "/v1/test", &struct{}{}); !errors.Is(err, want) {
+			t.Fatalf("transport error = %v", err)
+		}
+	})
+}
+
+func TestDoJSONRejectsUnknownFieldsAndInvalidEndpoint(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Body:       io.NopCloser(strings.NewReader(`{"ok":true,"extra":true}`)),
+		}, nil
+	})}
+	var decoded struct {
+		OK bool `json:"ok"`
+	}
+	if err := GetJSON(context.Background(), client, "/v1/test", &decoded); err == nil {
+		t.Fatal("unknown response field was accepted")
+	}
+	if err := GetJSON(context.Background(), client, "/bad\nendpoint", &decoded); err == nil {
+		t.Fatal("invalid endpoint was accepted")
+	}
+}
+
+type stubListener struct {
+	closeErr error
+}
+
+func (stubListener) Accept() (net.Conn, error) { return nil, errors.New("unused") }
+func (l stubListener) Close() error            { return l.closeErr }
+func (stubListener) Addr() net.Addr            { return &net.UnixAddr{Name: "test", Net: "unix"} }
+
+func TestCleanupListenerRemovesSocketPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "control.sock")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	listener := &cleanupListener{Listener: stubListener{}, path: path}
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("cleanup path still exists: %v", err)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatalf("repeated cleanup failed: %v", err)
+	}
+	want := errors.New("listener close failed")
+	listener = &cleanupListener{Listener: stubListener{closeErr: want}, path: filepath.Join(t.TempDir(), "missing.sock")}
+	if err := listener.Close(); !errors.Is(err, want) {
+		t.Fatalf("Close error = %v, want %v", err, want)
 	}
 }
 

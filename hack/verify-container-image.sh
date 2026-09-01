@@ -23,8 +23,10 @@ expect "$(docker image inspect --format '{{json .Config.Cmd}}' "$image")" '["dae
 expect "$(docker image inspect --format '{{len .RootFS.Layers}}' "$image")" "1" "filesystem layer count"
 expect "$(docker image inspect --format '{{json .Config.ExposedPorts}}' "$image")" "null" "exposed ports"
 expect "$(docker image inspect --format '{{json .Config.Volumes}}' "$image")" "null" "implicit volumes"
+expect "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.authors"}}' "$image")" "Shaun Murphy (@shoon)" "author metadata"
 expect "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.licenses"}}' "$image")" "Apache-2.0" "license metadata"
 expect "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.source"}}' "$image")" "https://github.com/shoon/fv-ssh-unlock" "source metadata"
+expect "$(docker image inspect --format '{{index .Config.Labels "io.github.shoon.sponsors"}}' "$image")" "https://github.com/sponsors/shoon" "sponsor metadata"
 
 health="$(docker image inspect --format '{{json .Config.Healthcheck.Test}}' "$image")"
 expect "$health" '["CMD","/fv-ssh-unlock","healthcheck","--socket","/run/fv-ssh-unlock/control.sock"]' "healthcheck"
