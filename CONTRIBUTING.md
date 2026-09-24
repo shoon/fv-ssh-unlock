@@ -114,7 +114,7 @@ New source files should carry the standard SPDX header:
 
 - Fork the repo and create a feature branch.
 - Make your changes and add tests.
-- Run `go build`, `go vet`, `go test -race`, and `govulncheck` (with and
+- Run `go build`, `go vet`, and `go test -race`, and `govulncheck` (with and
   without `-tags keyring`).
 - Sign off your commits (`git commit -s`).
 - Open a PR with a clear description of your changes.
@@ -127,9 +127,14 @@ disclosure guidance in [SECURITY.md](SECURITY.md).
 
 ## Release signing and containers
 
-Create a signed semantic-version tag such as `v1.2.3` or `v1.2.3-rc.1` only
-after the tagged commit has passed every required check. Never move or reuse a
-published tag; issue the next patch or release-candidate version instead.
+Use a semantic-version tag such as `v1.2.3` or `v1.2.3-rc.1` only after the
+exact source commit has passed release checks. Maintainers may push a signed
+Git tag, or use the GitHub-driven preparation workflow to create a lightweight
+tag on a validated main commit, like Takeout Helper. CI-created tags are not
+signed Git tag objects; checksum and container artifact signing remains
+mandatory. Never move or reuse a published tag; issue the next patch or
+release-candidate version instead. See [Tagged releases](docs/releasing.md)
+for the GitHub UI, CLI, connector request-branch path, and recovery procedure.
 
 Tags matching `v*` run two independent workflows:
 
@@ -143,16 +148,15 @@ Tags matching `v*` run two independent workflows:
   the multi-platform digest through GitHub OIDC, verifies the exact workflow
   identity, and reports the immutable digest in the job summary.
 
-Both publishing jobs accept only a pushed semantic-version tag and check that
-the tag, checked-out commit, GitHub event, and a commit on `origin/main`
-resolve to the same source. `workflow_dispatch` is verification-only and
-cannot publish an arbitrary ref. The Release workflow enforces this
-structurally: its `verify` job builds, tests, scans, and runs `goreleaser check`
-for the manually selected branch or tag, while the separate `publish` job is
-gated on `github.event_name == 'push'` and is the only job granted
-`contents: write` and `id-token: write`. A manual dispatch therefore performs
-the checks and stops without publishing; the strict tag/main binding is also
-applied whenever a tag push can reach the publishing job.
+Both publishers accept a version-tag push or an explicit `workflow_dispatch`
+on an existing version tag with a matching full `expected_sha`. Branch
+dispatches remain verification-only. Every publishing path checks that the
+tag, checkout, event SHA, and a commit on `origin/main` resolve to the same
+source; the remote tag is refreshed before verification and publication. The
+Release workflow still builds, tests, scans, and runs `goreleaser check` before
+its separate write-enabled publishing job can run. The preparation workflow
+uses a repository-scoped Actions token to create an unused tag and explicitly
+dispatch both publishers; it never force-updates refs or rewrites source.
 The repository requires `DOCKERHUB_USERNAME` and a narrowly scoped
 `DOCKERHUB_TOKEN` with read/write but no delete or administrative permission.
 Give the token a finite lifetime, record its expiry in maintainer operations,
