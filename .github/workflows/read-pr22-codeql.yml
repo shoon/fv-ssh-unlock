@@ -1,0 +1,21 @@
+name: Read PR22 CodeQL findings
+on:
+  push:
+    branches: [maintenance/read-pr22-codeql]
+    paths: [.github/workflows/read-pr22-codeql.yml]
+permissions:
+  contents: read
+  checks: read
+jobs:
+  annotations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Read existing CodeQL finding details without modifying alerts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = 'shoon/fv-ssh-unlock'
+          test "$(gh api repos/shoon/fv-ssh-unlock/check-runs/107749707783 --jq .head_sha)" = '05a045b9bab8cf91376b680c4aa926ffb8fb06cf'
+          gh api --paginate repos/shoon/fv-ssh-unlock/check-runs/107749707783/annotations
