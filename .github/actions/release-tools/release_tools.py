@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import string
 import sys
 import tarfile
 import tempfile
@@ -34,7 +35,33 @@ MANIFEST = "bucket/fv-ssh-unlock.json"
 IMAGE = "shoonimages/fv-ssh-unlock"
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 DIGEST = re.compile(r"[0-9a-f]{64}\Z")
-VERSION = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?\Z")
+# Version parsing is bounded and linear; no nested regex is applied to input.
+DOWNLOAD_ORIGINS = {
+    "github.com": "https://github.com",
+    "codeload.github.com": "https://codeload.github.com",
+    "release-assets.githubusercontent.com": "https://release-assets.githubusercontent.com",
+    "objects.githubusercontent.com": "https://objects.githubusercontent.com",
+    "auth.docker.io": "https://auth.docker.io",
+    "registry-1.docker.io": "https://registry-1.docker.io",
+    "production.cloudflare.docker.com": "https://production.cloudflare.docker.com",
+}
+API_ROOTS = {
+    "shoon/fv-ssh-unlock": "https://api.github.com/repos/shoon/fv-ssh-unlock",
+    "shoon/homebrew-tap": "https://api.github.com/repos/shoon/homebrew-tap",
+    "shoon/scoop-bucket": "https://api.github.com/repos/shoon/scoop-bucket",
+    "shoon/audio-fade-fixer": "https://api.github.com/repos/shoon/audio-fade-fixer",
+    "shoon/takeout-helper-gphotos": "https://api.github.com/repos/shoon/takeout-helper-gphotos",
+}
+# These workflows intentionally target GitHub-hosted runners. A self-hosted
+# deployment must explicitly review its runner paths instead of trusting an
+# arbitrary environment variable as a filesystem authority.
+HOSTED_TEMP_ROOTS = {
+    "/home/runner/work/_temp": "/home/runner/work/_temp",
+    "/Users/runner/work/_temp": "/Users/runner/work/_temp",
+    "D:/a/_temp": "D:/a/_temp",
+    "C:/a/_temp": "C:/a/_temp",
+    "/github/runner_temp": "/github/runner_temp",
+}
 MARKER = re.compile(r"<!-- release-sync (\{[^\n]+\}) -->")
 BOT = "github-actions[bot]"
 
@@ -53,15 +80,88 @@ def require(condition, message):
 
 
 def version_key(tag):
-    match = VERSION.fullmatch(tag)
-    require(match is not None and len(tag) <= 128, "Invalid canonical version tag")
-    major, minor, patch, prerelease = match.groups()
+    if not isinstance(tag, str) or not 1 <= len(tag) <= 128 or not tag.startswith("v"):
+        raise Refused("Invalid canonical version tag")
+    core, separator, prerelease = tag[1:].partition("-")
+    numbers = core.split(".")
+    if len(numbers) != 3:
+        raise Refused("Version must contain major, minor and patch")
+    for number in numbers:
+        if not number or any(char not in string.digits for char in number) or (len(number) > 1 and number[0] == "0"):
+            raise Refused("Invalid numeric version component")
     parts = []
-    if prerelease:
+    if separator:
         for part in prerelease.split("."):
-            require(not (part.isdigit() and len(part) > 1 and part[0] == "0"), "Noncanonical prerelease")
+            if not part or any(char not in string.ascii_letters + string.digits + "-" for char in part):
+                raise Refused("Invalid prerelease component")
+            if part.isdigit() and len(part) > 1 and part[0] == "0":
+                raise Refused("Noncanonical prerelease")
             parts.append((0, int(part)) if part.isdigit() else (1, part))
-    return (int(major), int(minor), int(patch), 0 if prerelease else 1, tuple(parts))
+    return (*map(int, numbers), 0 if separator else 1, tuple(parts))
+
+
+def encoded_location(path, query=""):
+    decoded = urllib.parse.unquote(path, errors="strict")
+    if not decoded.startswith("/") or "\\" in decoded or "%" in decoded:
+        raise Refused("Invalid URL path")
+    segments = decoded.split("/")
+    if any(part in (".", "..") or any(ord(char) < 32 or ord(char) == 127 for char in part) for part in segments):
+        raise Refused("URL traversal or control character refused")
+    # Encode each component, not the whole URL. In particular, user data can
+    # never supply an origin, credentials, query delimiter or fragment.
+    encoded = "/".join(urllib.parse.quote(part, safe="") for part in segments)
+    parameters = urllib.parse.parse_qsl(query, keep_blank_values=True, strict_parsing=True)
+    suffix = urllib.parse.urlencode(parameters, quote_via=urllib.parse.quote)
+    return encoded + ("?" + suffix if suffix else "")
+
+
+def download_url(url):
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != "https" or parsed.username or parsed.password or parsed.port not in (None, 443) or parsed.fragment:
+        raise Refused("Unsafe download URL")
+    if parsed.hostname not in DOWNLOAD_ORIGINS:
+        raise Refused("Download origin is not an approved GitHub or Docker endpoint")
+    origin = DOWNLOAD_ORIGINS[parsed.hostname]
+    return origin + encoded_location(parsed.path or "/", parsed.query)
+
+
+def api_url(repo, path):
+    if repo not in API_ROOTS:
+        raise Refused("Unapproved API repository")
+    parsed = urllib.parse.urlsplit(path)
+    if parsed.scheme or parsed.netloc or parsed.fragment or not path.startswith("/") or path.startswith("//"):
+        raise Refused("Invalid repository API endpoint")
+    return API_ROOTS[repo] + encoded_location(parsed.path, parsed.query)
+
+
+def hosted_temp():
+    configured = Path(os.environ["RUNNER_TEMP"]).as_posix().rstrip("/")
+    if configured not in HOSTED_TEMP_ROOTS:
+        raise Refused("Runner temporary directory is not an approved hosted-runner path")
+    root = Path(HOSTED_TEMP_ROOTS[configured])
+    if root.is_symlink() or root.resolve() != root:
+        raise Refused("Runner temporary directory is redirected")
+    return root
+
+
+def github_file(variable):
+    root = hosted_temp()
+    raw = Path(os.environ[variable])
+    if variable == "GITHUB_EVENT_PATH":
+        expected = root / "_github_workflow" / "event.json"
+    else:
+        prefixes = {"GITHUB_OUTPUT": "set_output_", "GITHUB_STEP_SUMMARY": "step_summary_"}
+        if variable not in prefixes:
+            raise Refused("Unknown runner command file")
+        # basename is a traversal boundary; the UUID-shaped name and exact
+        # directory must both match the runner's file-command contract.
+        name = os.path.basename(str(raw))
+        if not re.fullmatch(prefixes[variable] + r"[0-9a-fA-F-]{36}", name):
+            raise Refused("Invalid runner command-file name")
+        expected = root / "_runner_file_commands" / name
+    if raw != expected or raw.is_symlink() or expected.resolve().parent != expected.parent:
+        raise Refused("Runner command/event path is outside its approved directory")
+    return expected
 
 
 def sha256(data):
@@ -70,10 +170,8 @@ def sha256(data):
 
 class SafeRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        parsed = urllib.parse.urlsplit(newurl)
-        require(parsed.scheme == "https" and not parsed.username and not parsed.password,
-                "Unsafe download redirect")
-        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        safe_url = download_url(newurl)
+        redirected = super().redirect_request(req, fp, code, msg, headers, safe_url)
         if redirected:
             redirected.remove_header("Authorization")
             redirected.remove_header("Cookie")
@@ -86,10 +184,8 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def download(url, *, limit=100_000_000, headers=None):
-    parsed = urllib.parse.urlsplit(url)
-    require(parsed.scheme == "https" and not parsed.username and not parsed.password,
-            "Downloads must use HTTPS")
-    request = urllib.request.Request(url, headers={"User-Agent": "shoon-release-tools", **(headers or {})})
+    safe_url = download_url(url)
+    request = urllib.request.Request(safe_url, headers={"User-Agent": "shoon-release-tools", **(headers or {})})
     with urllib.request.build_opener(SafeRedirect).open(request, timeout=60) as response:
         data = response.read(limit + 1)
     require(len(data) <= limit, "Download exceeds the configured size limit")
@@ -114,7 +210,7 @@ class API:
         # Public cross-repository reads do not need a cross-repository secret.
         if self.token:
             headers["Authorization"] = "Bearer " + self.token
-        request = urllib.request.Request("https://api.github.com/repos/" + self.repo + path,
+        request = urllib.request.Request(api_url(self.repo, path),
                                          data=None if payload is None else json.dumps(payload).encode(),
                                          headers=headers, method=method)
         try:
@@ -152,13 +248,13 @@ class API:
 def summary(text):
     print(text, flush=True)
     if os.environ.get("GITHUB_STEP_SUMMARY"):
-        with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as stream:
+        with open(github_file("GITHUB_STEP_SUMMARY"), "a", encoding="utf-8") as stream:
             stream.write(text + "\n\n")
 
 
 def outputs(**values):
     if os.environ.get("GITHUB_OUTPUT"):
-        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as stream:
+        with open(github_file("GITHUB_OUTPUT"), "a", encoding="utf-8") as stream:
             for name, value in values.items():
                 require("\n" not in str(value) and "\r" not in str(value), "Multiline output refused")
                 stream.write(f"{name}={value}\n")
@@ -351,9 +447,12 @@ def candidate_release(api, channel, tag=""):
     releases = [api.call("/releases/tags/" + tag)] if tag else api.pages("/releases")
     eligible = []
     for release in releases:
-        if release["draft"] or not VERSION.fullmatch(release["tag_name"]):
+        if release["draft"]:
             continue
-        key = version_key(release["tag_name"])
+        try:
+            key = version_key(release["tag_name"])
+        except Refused:
+            continue
         require(release["prerelease"] == (key[3] == 0), "Release channel mismatch")
         if channel == "preview" or not release["prerelease"]:
             eligible.append(release)
@@ -683,15 +782,17 @@ def main():
     tag = os.environ.get("RELEASE_TAG", "")
     expected = os.environ.get("EXPECTED_SHA", "")
     channel = os.environ.get("RELEASE_CHANNEL", "")
-    event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text()) if os.environ.get("GITHUB_EVENT_PATH") else {}
+    event = json.loads(github_file("GITHUB_EVENT_PATH").read_text(encoding="utf-8")) if os.environ.get("GITHUB_EVENT_PATH") else {}
     if operation in ("verify", "status"):
         if not tag and event.get("workflow_run"):
             tag, expected = event["workflow_run"]["head_branch"], event["workflow_run"]["head_sha"]
         if not tag:
             tag = candidate_release(API(SOURCE), channel or "preview")["tag_name"]
         report = verify_release(tag, expected, full=operation == "verify", wait=900 if event.get("workflow_run") else 0)
-        destination = Path(os.environ.get("RUNNER_TEMP", tempfile.gettempdir())) / ("verified-" + tag + ".json")
-        destination.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        destination = hosted_temp() / "verified-release.json"
+        # Exclusive creation refuses symlinks and any existing output file.
+        with destination.open("x", encoding="utf-8") as stream:
+            stream.write(json.dumps(report, indent=2) + "\n")
         outputs(tag=tag, commit=report["commit"], report_path=str(destination))
         if operation == "status":
             write_status_issue(report, distribution_status(report))
