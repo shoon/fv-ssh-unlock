@@ -1,0 +1,33 @@
+name: Release distribution status
+on:
+  schedule:
+    - cron: '53 * * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag; blank reports the newest stable or preview release
+        required: false
+        type: string
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: release-distribution-status
+  cancel-in-progress: false
+jobs:
+  report:
+    if: github.repository == 'shoon/fv-ssh-unlock'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/release-tools
+        with:
+          operation: status
+          tag: ${{ inputs.tag }}

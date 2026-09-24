@@ -1,0 +1,57 @@
+name: Verified release operations
+description: Verify immutable fv-ssh-unlock releases and prepare approval-gated package updates
+inputs:
+  operation:
+    description: verify, status, sync, stage-pr, or publish-check
+    default: verify
+  tag:
+    description: Existing upstream version tag; blank selects the configured channel
+    default: ''
+  expected-sha:
+    description: Optional exact upstream source commit
+    default: ''
+  channel:
+    description: stable or preview; blank uses package repository configuration
+    default: ''
+  dry-run:
+    description: For sync, leave true to verify without writing branches or PRs
+    default: 'true'
+  token:
+    description: Repository-scoped Actions token; never requires a cross-repository secret
+    default: ${{ github.token }}
+outputs:
+  tag:
+    description: Verified version tag
+    value: ${{ steps.operation.outputs.tag }}
+  commit:
+    description: Verified source SHA
+    value: ${{ steps.operation.outputs.commit }}
+  report-path:
+    description: Local JSON verification report
+    value: ${{ steps.operation.outputs.report_path }}
+  pr:
+    description: Package PR number
+    value: ${{ steps.operation.outputs.pr }}
+  head:
+    description: Authorized package PR head
+    value: ${{ steps.operation.outputs.head }}
+  base:
+    description: Authorized package main SHA
+    value: ${{ steps.operation.outputs.base }}
+runs:
+  using: composite
+  steps:
+    - if: inputs.operation != 'stage-pr'
+      uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      with:
+        cosign-release: v3.1.2
+    - id: operation
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        OPERATION: ${{ inputs.operation }}
+        RELEASE_TAG: ${{ inputs.tag }}
+        EXPECTED_SHA: ${{ inputs.expected-sha }}
+        RELEASE_CHANNEL: ${{ inputs.channel }}
+        DRY_RUN: ${{ inputs.dry-run }}
+      run: python3 "$GITHUB_ACTION_PATH/release_tools.py"

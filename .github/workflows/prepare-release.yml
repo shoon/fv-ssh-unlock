@@ -5,12 +5,12 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'New version tag, for example v0.2.0-rc.4'
+        description: 'New version tag, for example v0.2.0-rc.5'
         required: true
         type: string
       expected_sha:
-        description: 'Full, tested main commit SHA to release'
-        required: true
+        description: 'Optional full tested main SHA; blank locks to this workflow event commit'
+        required: false
         type: string
   push:
     branches: ['release/request/v*']
@@ -45,7 +45,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
-          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          EXPECTED_SHA: ${{ inputs.expected_sha || github.sha }}
         run: python3 hack/tagged_release.py request
 
   create-tag:
