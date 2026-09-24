@@ -1,0 +1,71 @@
+# SPDX-License-Identifier: Apache-2.0
+name: Prepare tagged release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'New version tag, for example v0.2.0-rc.4'
+        required: true
+        type: string
+      expected_sha:
+        description: 'Full, tested main commit SHA to release'
+        required: true
+        type: string
+  push:
+    branches: ['release/request/v*']
+    paths: ['.github/release-request.json']
+
+permissions:
+  contents: read
+  actions: read
+  checks: read
+  statuses: read
+
+concurrency:
+  group: prepare-tagged-release
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    if: github.repository == 'shoon/fv-ssh-unlock'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.request.outputs.tag }}
+      sha: ${{ steps.request.outputs.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate immutable request and exact-commit checks
+        id: request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: python3 hack/tagged_release.py request
+
+  create-tag:
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: write
+      checks: read
+      statuses: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.preflight.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Recheck main, create tag, and dispatch publishers
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+          EXPECTED_SHA: ${{ needs.preflight.outputs.sha }}
+        run: python3 hack/tagged_release.py create

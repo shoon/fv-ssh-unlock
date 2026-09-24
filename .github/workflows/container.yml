@@ -20,6 +20,8 @@ on:
       - pkg/**
       - deploy/**
       - hack/verify-container-image.sh
+      - hack/tagged_release.py
+      - hack/test_tagged_release.py
       - .github/workflows/container.yml
   pull_request:
     branches: [main]
@@ -36,8 +38,15 @@ on:
       - pkg/**
       - deploy/**
       - hack/verify-container-image.sh
+      - hack/tagged_release.py
+      - hack/test_tagged_release.py
       - .github/workflows/container.yml
   workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: 'Full commit SHA; required when publishing an existing version tag'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -53,7 +62,14 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
           persist-credentials: false
+      - name: Bind release image to the exact version tag and main
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: python3 hack/tagged_release.py bind
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Build local validation image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -83,7 +99,10 @@ jobs:
           sbom: true
 
   publish:
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      github.repository == 'shoon/fv-ssh-unlock' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      startsWith(github.ref, 'refs/tags/v')
     needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -93,34 +112,19 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - id: release
-        name: Bind the image version to the pushed tag
+        name: Bind the image version to the exact tag and main
         env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
           IMAGE_TAG: ${{ github.ref_name }}
-          EXPECTED_REF: refs/tags/${{ github.ref_name }}
         run: |
-          if [[ "$GITHUB_REF" != "$EXPECTED_REF" ]]; then
-            echo "release tag/ref mismatch: tag=$IMAGE_TAG ref=$GITHUB_REF" >&2
-            exit 1
-          fi
-          if [[ ! "$IMAGE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
-            echo "release tag is not a supported semantic version: $IMAGE_TAG" >&2
-            exit 1
-          fi
-          if [[ "$(git rev-parse HEAD)" != "$GITHUB_SHA" || \
-                "$(git rev-parse "$IMAGE_TAG^{commit}")" != "$GITHUB_SHA" ]]; then
-            echo "release tag, checkout, and GitHub event do not resolve to one commit" >&2
-            exit 1
-          fi
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "release tag does not point to a commit on origin/main" >&2
-            exit 1
-          fi
+          python3 hack/tagged_release.py bind
           echo "tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
           echo "created=$(git show -s --format=%cI "$GITHUB_SHA")" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Require Docker Hub publisher credentials
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}

@@ -160,6 +160,8 @@ jobs:
         run: |
           go mod tidy -diff
           (cd tools/mock-fv-ssh-server && go mod tidy -diff)
+      - name: Test release automation guards
+        run: python3 -m unittest discover -s hack -p 'test_tagged_release.py' -v
       - name: Lint Actions workflows
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
       - name: Install vulnerability scanner
