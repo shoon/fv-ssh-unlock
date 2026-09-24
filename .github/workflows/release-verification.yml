@@ -1,0 +1,45 @@
+name: Verify published release
+on:
+  workflow_run:
+    workflows: [Release, Container]
+    types: [completed]
+    branches: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to verify; never creates or republishes a release
+        required: true
+        type: string
+      expected_sha:
+        description: Optional full upstream commit SHA
+        required: false
+        type: string
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: verify-published-${{ inputs.tag || github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # workflow_run executes verifier code from trusted default-branch source,
+      # never from the upstream run's head/PR or a downloaded artifact.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify exact source, both publishers, signatures, assets, and container
+        id: release
+        uses: ./.github/actions/release-tools
+        with:
+          tag: ${{ inputs.tag }}
+          expected-sha: ${{ inputs.expected_sha }}
+      - name: Retain verification report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: verified-release-${{ steps.release.outputs.tag }}
+          path: ${{ steps.release.outputs.report-path }}
+          if-no-files-found: error
+          retention-days: 90
