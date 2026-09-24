@@ -44,6 +44,7 @@ DOWNLOAD_ORIGINS = {
     "auth.docker.io": "https://auth.docker.io",
     "registry-1.docker.io": "https://registry-1.docker.io",
     "production.cloudflare.docker.com": "https://production.cloudflare.docker.com",
+    "production.cloudfront.docker.com": "https://production.cloudfront.docker.com",
 }
 API_ROOTS = {
     "shoon/fv-ssh-unlock": "https://api.github.com/repos/shoon/fv-ssh-unlock",
@@ -112,6 +113,13 @@ def encoded_location(path, query=""):
     encoded = "/".join(urllib.parse.quote(part, safe="") for part in segments)
     parameters = urllib.parse.parse_qsl(query, keep_blank_values=True, strict_parsing=True)
     suffix = urllib.parse.urlencode(parameters, quote_via=urllib.parse.quote)
+    # Validate the final wire representation too: only path separators and
+    # percent-encoded components may enter the endpoint; query separators can
+    # only be emitted by urlencode, never by an unescaped query value.
+    if not re.fullmatch(r"/[A-Za-z0-9/._~%\-]*", encoded):
+        raise Refused("Invalid encoded request path")
+    if not re.fullmatch(r"[A-Za-z0-9%._~=&\-]*", suffix):
+        raise Refused("Invalid encoded query parameters")
     return encoded + ("?" + suffix if suffix else "")
 
 
@@ -146,22 +154,29 @@ def hosted_temp():
 
 def github_file(variable):
     root = hosted_temp()
-    raw = Path(os.environ[variable])
+    raw = os.environ[variable]
     if variable == "GITHUB_EVENT_PATH":
-        expected = root / "_github_workflow" / "event.json"
+        directory = root / "_github_workflow"
+        name = "event.json"
     else:
         prefixes = {"GITHUB_OUTPUT": "set_output_", "GITHUB_STEP_SUMMARY": "step_summary_"}
         if variable not in prefixes:
             raise Refused("Unknown runner command file")
-        # basename is a traversal boundary; the UUID-shaped name and exact
-        # directory must both match the runner's file-command contract.
-        name = os.path.basename(str(raw))
+        directory = root / "_runner_file_commands"
+        name = os.path.basename(raw)
         if not re.fullmatch(prefixes[variable] + r"[0-9a-fA-F-]{36}", name):
             raise Refused("Invalid runner command-file name")
-        expected = root / "_runner_file_commands" / name
-    if raw != expected or raw.is_symlink() or expected.resolve().parent != expected.parent:
-        raise Refused("Runner command/event path is outside its approved directory")
-    return expected
+    # Normalize before enforcing directory containment. No filesystem access is
+    # performed on the raw environment value, and symlinks are refused.
+    base = os.path.abspath(str(directory))
+    expected = os.path.abspath(os.path.join(base, name))
+    if not expected.startswith(base + os.sep):
+        raise Refused("Runner command/event file escapes its approved directory")
+    if Path(raw) != Path(expected):
+        raise Refused("Runner command/event path differs from the approved path")
+    if os.path.islink(expected) or os.path.realpath(expected) != expected:
+        raise Refused("Runner command/event file is redirected")
+    return Path(expected)
 
 
 def sha256(data):
