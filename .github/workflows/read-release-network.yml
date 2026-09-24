@@ -1,0 +1,38 @@
+name: Inspect public release network
+on:
+  push:
+    branches: [maintenance/read-pr22-codeql]
+    paths: [.github/workflows/read-release-network.yml]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Print only the public Docker blob redirect hostname
+        run: |
+          python3 - <<'PY'
+          import json, urllib.request, urllib.error, urllib.parse
+          image = 'shoonimages/fv-ssh-unlock'
+          token = json.load(urllib.request.urlopen('https://auth.docker.io/token?service=registry.docker.io&scope=repository:' + image + ':pull', timeout=30))['token']
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  return None
+          opener = urllib.request.build_opener(NoRedirect)
+          def read(path):
+              req = urllib.request.Request('https://registry-1.docker.io/v2/' + image + path, headers={'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json'})
+              return opener.open(req, timeout=30)
+          index = json.load(read('/manifests/v0.2.0-rc.4'))
+          platform = next(m for m in index['manifests'] if m.get('platform',{}).get('architecture') == 'amd64')
+          config = json.load(read('/manifests/' + platform['digest']))['config']['digest']
+          try:
+              response = read('/blobs/' + config)
+          except urllib.error.HTTPError as error:
+              if error.code not in (301,302,303,307,308):
+                  raise
+              print('Public blob redirect host:', urllib.parse.urlsplit(error.headers['Location']).hostname)
+          else:
+              print('Public blob served directly by registry-1.docker.io')
+              response.close()
+          PY
