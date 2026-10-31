@@ -72,8 +72,13 @@ jobs:
 
   # Publisher runs dispatched with GITHUB_TOKEN do not raise workflow_run
   # events, so the standalone Verify published release workflow never starts
-  # for a release created here. Verify in this run instead, from the validated
-  # main commit's code, waiting for both publishers to finish.
+  # for a release created here. Verify in this run instead, waiting for both
+  # publishers to finish.
+  #
+  # Check out the event commit, as preflight does, rather than a computed ref.
+  # Preflight has already proven it runs validated main code: a dispatch must
+  # be on main at exactly the requested SHA, and a request-branch commit must
+  # differ from that SHA only by the request JSON.
   verify:
     needs: [preflight, create-tag]
     runs-on: ubuntu-latest
@@ -84,7 +89,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.preflight.outputs.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
       - name: Verify exact source, both publishers, signatures, assets, and container
         id: release
