@@ -4,6 +4,35 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.2.0-rc.5] - 2026-10-31
+
+### Security
+
+- Built with Go 1.26.10, which fixes standard-library vulnerabilities reachable
+  from this program in `net/http`, `net/textproto`, `crypto/tls`, and
+  `crypto/x509` (GO-2026-6603, GO-2026-6605, GO-2026-6607, GO-2026-6608,
+  GO-2026-6610, GO-2026-6611, GO-2026-6612, GO-2026-6613, GO-2026-6617,
+  GO-2026-6809). The container build image is updated to match.
+- Updated `golang.org/x/crypto` to v0.58.0, `golang.org/x/sys` to v0.49.0,
+  `golang.org/x/term` to v0.47.0, and `golang.org/x/net` to v0.60.0.
+
+### Changed
+
+- Release verification now checks the published archives, SBOMs, signed
+  checksums, source archive, and signed container for each tagged release, and
+  Homebrew/Scoop package updates are proposed automatically for maintainer
+  approval.
+- Updated pinned GitHub Actions (GoReleaser, Docker login, upload-artifact,
+  Syft).
+
+## [0.2.0-rc.4] - 2026-09-24
+
+### Changed
+
+- Tagged releases can be prepared from GitHub Actions against an exact, tested
+  `main` commit.
+- Updated `golang.org/x/crypto` to v0.57.0 and pinned Docker build actions.
+
 ## [0.2.0-rc.3] - 2026-09-01
 
 ### Added

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-ARG GO_IMAGE=golang:1.26.7-bookworm@sha256:e8c859f5632dcfde7b32d2012b4351728f6437930887c2f6a91ea242459e5514
+ARG GO_IMAGE=golang:1.26.10-bookworm@sha256:23ce71337b726608afb1bc00986e630a05034a87a87ea1fc2cd1ae5cf33387eb
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS build
 
 ARG TARGETOS

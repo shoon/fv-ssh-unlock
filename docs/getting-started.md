@@ -32,7 +32,7 @@ Mac available for FileVault-over-SSH recovery.
 | SSH service | Remote Login enabled before restart. |
 | Network | A pre-boot-compatible connection between the client and target. |
 | Client operating system | macOS, Linux, or Windows. |
-| Source build only | Go 1.26.7 or newer. Release archives do not require Go. |
+| Source build only | Go 1.26.10 or newer. Release archives do not require Go. |
 
 Pre-boot networking is more restricted than normal macOS networking. Wired
 Ethernet is preferred. Apple documents previously joined open or WPA2-Personal

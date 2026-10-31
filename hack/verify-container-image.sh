@@ -37,7 +37,10 @@ docker image save --output "$audit_dir/image.tar" "$image"
 manifest="$(tar -xOf "$audit_dir/image.tar" manifest.json)"
 layer="$(printf '%s\n' "$manifest" | sed -nE 's/.*"Layers":\["([^"]+)"\].*/\1/p')"
 [[ -n "$layer" ]] || fail "could not identify the sole image layer"
-rootfs_entries="$(tar -xOf "$audit_dir/image.tar" "$layer" | tar -tf - | sed 's#^\./##; s#/$##' | LC_ALL=C sort -u)"
+# Newer Docker engines save layer blobs gzip-compressed. Extract the blob to a
+# file so tar auto-detects compression, which it cannot do on a pipe.
+tar -xOf "$audit_dir/image.tar" "$layer" >"$audit_dir/layer.tar"
+rootfs_entries="$(tar -tf "$audit_dir/layer.tar" | sed 's#^\./##; s#/$##' | LC_ALL=C sort -u)"
 expected_entries="$(printf '%s\n' \
   fv-ssh-unlock \
   licenses \
