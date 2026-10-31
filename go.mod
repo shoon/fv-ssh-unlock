@@ -1,6 +1,6 @@
 module github.com/shoon/fv-ssh-unlock
 
-go 1.26.7
+go 1.26.10
 
 require (
 	github.com/grandcat/zeroconf v1.0.0

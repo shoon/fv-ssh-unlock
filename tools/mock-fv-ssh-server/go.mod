@@ -1,6 +1,6 @@
 module mock-fv-ssh-server
 
-go 1.26.7
+go 1.26.10
 
 require golang.org/x/crypto v0.58.0
 

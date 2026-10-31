@@ -49,7 +49,7 @@ By making a contribution to this project, I certify that:
 
 This repository contains two Go modules (the main module and
 `tools/mock-fv-ssh-server`); a `go.work` file ties them together for local
-development. Requires Go 1.26.7+.
+development. Requires Go 1.26.10+.
 
 ```bash
 go build ./...
