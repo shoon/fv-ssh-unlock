@@ -561,7 +561,10 @@ def create_package_pr(api, main, branch, changes, title, instructions):
             if state["base"] == main and all(api.file(path, old_sha) == content for path, content in changes.items()):
                 summary(f"Existing update: {pr['html_url']} — approve its workflows if GitHub requests approval.")
                 return pr
-            parents = [old_sha, main]
+            # Rebuild as one commit on current main rather than merging main in:
+            # brew pr-pull cherry-picks PR commits and cannot pick a merge commit.
+            # The checks above already proved the branch holds only our generated data.
+            parents = [main]
         else:
             # Recover only our exact orphaned first commit after PR creation failed.
             commit = api.call("/git/commits/" + old_sha)
@@ -581,7 +584,7 @@ def create_package_pr(api, main, branch, changes, title, instructions):
         require(api.main() == main, "Package main changed before branch update")
         if old:
             require(api.call("/git/ref/heads/" + branch)["object"]["sha"] == old_sha, "Managed branch changed concurrently")
-            api.call("/git/refs/heads/" + branch, {"sha": commit["sha"], "force": False}, method="PATCH")
+            api.call("/git/refs/heads/" + branch, {"sha": commit["sha"], "force": True}, method="PATCH")
         else:
             api.call("/git/refs", {"ref": "refs/heads/" + branch, "sha": commit["sha"]})
     if pr:
