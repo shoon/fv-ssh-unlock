@@ -399,6 +399,24 @@ def verify_container(tag, sha):
     return digest
 
 
+MAX_PUBLISHER_WAIT = 3600
+
+
+def publisher_wait(requested, event):
+    """Seconds to wait for in-flight publishers before verifying.
+
+    A workflow_run event fires after one publisher finishes, so the other may
+    still be running. An explicit request comes from Prepare tagged release,
+    which dispatches both publishers and then verifies them in the same run.
+    A manual verification with neither waits for nothing.
+    """
+    if requested == "":
+        return 900 if event.get("workflow_run") else 0
+    require(requested.isdigit() and int(requested) <= MAX_PUBLISHER_WAIT,
+            f"Publisher wait must be 0-{MAX_PUBLISHER_WAIT} seconds")
+    return int(requested)
+
+
 def verify_release(tag, expected="", *, full=True, wait=0, api=None):
     api = api or API(SOURCE)
     sha = resolve_tag(api, tag, expected)
@@ -803,7 +821,8 @@ def main():
             tag, expected = event["workflow_run"]["head_branch"], event["workflow_run"]["head_sha"]
         if not tag:
             tag = candidate_release(API(SOURCE), channel or "preview")["tag_name"]
-        report = verify_release(tag, expected, full=operation == "verify", wait=900 if event.get("workflow_run") else 0)
+        report = verify_release(tag, expected, full=operation == "verify",
+                                wait=publisher_wait(os.environ.get("PUBLISHER_WAIT_SECONDS", ""), event))
         destination = hosted_temp() / "verified-release.json"
         # Exclusive creation refuses symlinks and any existing output file.
         with destination.open("x", encoding="utf-8") as stream:

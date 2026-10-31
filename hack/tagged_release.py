@@ -203,8 +203,9 @@ def create(api, tag: str, sha: str) -> None:
             "ref": tag, "inputs": {"expected_sha": sha},
         })
         summary(f"Dispatched `{workflow}` for `{tag}` / `{sha}`.")
-    summary("Check BOTH Release and Container publish jobs and the resulting assets before "
-            "calling this release complete. Update Homebrew/Scoop only after verifying their hashes.")
+    summary("This run's `verify` job waits for BOTH Release and Container and verifies the "
+            "published assets; the release is complete only when it passes. "
+            "Homebrew/Scoop updates remain separate and human-approved.")
 
 
 def bind() -> None:

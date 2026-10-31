@@ -13,6 +13,9 @@ inputs:
   channel:
     description: stable or preview; blank uses package repository configuration
     default: ''
+  publisher-wait-seconds:
+    description: For verify, seconds to wait for in-flight Release/Container publishers; blank uses the event default
+    default: ''
   dry-run:
     description: For sync, leave true to verify without writing branches or PRs
     default: 'true'
@@ -54,4 +57,5 @@ runs:
         EXPECTED_SHA: ${{ inputs.expected-sha }}
         RELEASE_CHANNEL: ${{ inputs.channel }}
         DRY_RUN: ${{ inputs.dry-run }}
+        PUBLISHER_WAIT_SECONDS: ${{ inputs.publisher-wait-seconds }}
       run: python3 "$GITHUB_ACTION_PATH/release_tools.py"
