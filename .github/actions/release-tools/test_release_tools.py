@@ -287,6 +287,23 @@ class PRWrites(unittest.TestCase):
             t.create_package_pr(api, A, "automation/x", {t.FORMULA: "new"}, "title", "body")
         self.assertEqual(api.writes, [])
 
+    def test_refresh_rebuilds_single_commit_on_new_main(self):
+        # Main moved from A to C since the PR was generated at B; the refresh must
+        # not merge main in, because brew pr-pull cannot cherry-pick merge commits.
+        api = FakeAPI({"/git/ref/heads/automation/x": {"object": {"sha": B}},
+                       f"/compare/{A}...{B}": {"files": [{"filename": t.FORMULA}]},
+                       "/git/commits/" + C: {"tree": {"sha": A}}})
+        api.mains = [C]
+        api.prs = [{"state": "open", "number": 7, "user": {"login": t.BOT}, "head": {"repo": {"full_name": t.TAP}},
+                    "body": '<!-- release-sync ' + json.dumps({"base": A, "files": {t.FORMULA: t.sha256(b"new")}}) + ' -->'}]
+        api.files[t.FORMULA, B] = "new"
+        t.create_package_pr(api, C, "automation/x", {t.FORMULA: "new"}, "title", "body")
+        writes = {path: (payload, kwargs) for path, payload, kwargs in api.writes}
+        self.assertEqual(writes["/git/commits"][0]["parents"], [C])
+        self.assertEqual(writes["/git/refs/heads/automation/x"], ({"sha": C, "force": True}, {"method": "PATCH"}))
+        self.assertIn("/pulls/7", writes)
+        self.assertNotIn("refs/heads/main", json.dumps(api.writes))
+
     def test_orphan_branch_must_match_exact_generated_changes(self):
         api = FakeAPI({"/git/ref/heads/automation/x": {"object": {"sha": B}},
                        "/git/commits/" + B: {"parents": [{"sha": A}]},
