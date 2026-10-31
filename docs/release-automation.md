@@ -12,12 +12,15 @@
    The optional SHA defaults to the workflow event's exact commit, never a
    moving branch. A changed main or incomplete/failed check still refuses release.
    The existing data-only `release/request/<tag>` path also works from chat.
-3. Release and Container publish and sign exactly that tag/source. Verify
-   published release automatically waits for both publishers, downloads all
-   native payloads/SBOMs, checks the signed checksum manifest, matches the source
+3. Release and Container publish and sign exactly that tag/source. Prepare's
+   final `verify` job waits for both publishers, downloads all native
+   payloads/SBOMs, checks the signed checksum manifest, matches the source
    archive against Git objects, and verifies the container's source labels,
-   platforms, attestation descriptors and Cosign identity. Its JSON report is an
-   Actions artifact, not a replacement release artifact.
+   platforms, attestation descriptors and Cosign identity. (Publishers
+   dispatched by Prepare do not trigger the standalone Verify published release
+   workflow, which remains for pushed tags and manual re-checks.) Its JSON
+   report is an Actions artifact, not a replacement release artifact. A Claude
+   Code session can perform steps 2-3 on request; see `docs/releasing.md`.
 4. Each package repo's Sync fv-ssh-unlock release workflow checks hourly, or can
    be run manually on its `main` for an explicit tag. It verifies upstream before
    opening a version-only PR. No personal token or new cross-repository secret

@@ -65,6 +65,17 @@ Only that job has `contents: write` and `actions: write`; no repository settings
 or protection rules are changed. Anyone allowed to write such a branch can
 request a release; this path does not introduce an extra human approval gate.
 
+## Releasing through Claude Code
+
+A Claude Code session with the GitHub connector can run the whole release on a
+maintainer's request: wait for the exact `main` commit's CI to pass, then
+dispatch Prepare tagged release with `tag` and `expected_sha` (or use the
+request-branch path above). The single run tags, publishes, and verifies, so
+no further manual dispatch is needed. The same CI, ancestry, and immutability
+gates apply as for any other requester. Package-feed publication remains
+human-approved: approving bot-PR workflow runs, merging the Scoop PR, and the
+Homebrew `/publish FULL_HEAD_SHA` comment.
+
 The explicit dispatch is necessary because tag writes made using
 `GITHUB_TOKEN` do not start another push workflow. Authenticated
 `workflow_dispatch` is the supported exception. The temporary-workflow
@@ -82,11 +93,19 @@ workflow reruns build/test/vulnerability checks before GoReleaser publishes.
 Container verification and both-platform image builds remain required before
 registry publication. Cosign signing and verification remain enabled.
 
-A successful Prepare run means the tag was created and publisher workflows
-were queued, **not** that release publication has finished. Check the exact-tag
-Release and Container runs, their publish jobs, and the resulting native
-archives/packages, checksums, Sigstore checksum bundle, SBOMs, and signed image
-digest. A failed publisher does not cause the tag to be deleted or moved.
+Prepare's final `verify` job then waits (up to an hour) for both exact-tag
+publishers and runs the same read-only verification as **Verify published
+release**: both publish jobs, every native archive/package and SBOM, the signed
+checksum manifest, the source archive, and the signed multi-platform image. Its
+JSON report is retained as a `verified-release-<tag>` artifact. This job exists
+because publisher runs dispatched with `GITHUB_TOKEN` do not raise the
+`workflow_run` events that would otherwise start the standalone verifier.
+
+A fully green Prepare run therefore means the release was published **and**
+verified. It does not mean the Homebrew/Scoop feeds are updated; see below. A
+failed publisher or verification does not cause the tag to be deleted or moved.
+To re-check an existing release, run **Verify published release** manually with
+its tag and SHA.
 
 If a dispatch failed after tag creation, do not rerun Prepare expecting it to
 reuse the tag. Inspect the existing release and runs first. A still-unpublished

@@ -69,3 +69,39 @@ jobs:
           RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
           EXPECTED_SHA: ${{ needs.preflight.outputs.sha }}
         run: python3 hack/tagged_release.py create
+
+  # Publisher runs dispatched with GITHUB_TOKEN do not raise workflow_run
+  # events, so the standalone Verify published release workflow never starts
+  # for a release created here. Verify in this run instead, waiting for both
+  # publishers to finish.
+  #
+  # Check out the event commit, as preflight does, rather than a computed ref.
+  # Preflight has already proven it runs validated main code: a dispatch must
+  # be on main at exactly the requested SHA, and a request-branch commit must
+  # differ from that SHA only by the request JSON.
+  verify:
+    needs: [preflight, create-tag]
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify exact source, both publishers, signatures, assets, and container
+        id: release
+        uses: ./.github/actions/release-tools
+        with:
+          tag: ${{ needs.preflight.outputs.tag }}
+          expected-sha: ${{ needs.preflight.outputs.sha }}
+          publisher-wait-seconds: '3600'
+      - name: Retain verification report
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: verified-release-${{ steps.release.outputs.tag }}
+          path: ${{ steps.release.outputs.report-path }}
+          if-no-files-found: error
+          retention-days: 90

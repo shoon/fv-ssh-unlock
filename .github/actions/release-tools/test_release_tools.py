@@ -199,6 +199,15 @@ class PackageFiles(unittest.TestCase):
 
 
 class Checks(unittest.TestCase):
+    def test_publisher_wait(self):
+        self.assertEqual(t.publisher_wait("", {}), 0)
+        self.assertEqual(t.publisher_wait("", {"workflow_run": {"id": 1}}), 900)
+        self.assertEqual(t.publisher_wait("3600", {}), 3600)
+        self.assertEqual(t.publisher_wait("0", {"workflow_run": {"id": 1}}), 0)
+        for bad in ("3601", "-1", "1e3", " 60", "ten"):
+            with self.assertRaises(t.Refused):
+                t.publisher_wait(bad, {})
+
     def test_success(self):
         api = FakeAPI({f"/commits/{A}/check-runs?filter=latest": [{"head_sha": A, "status": "completed", "conclusion": "success"}],
                        f"/commits/{A}/statuses": []})
