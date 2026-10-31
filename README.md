@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="https://github.com/shoon/fv-ssh-unlock/actions/workflows/ci.yml"><img src="https://github.com/shoon/fv-ssh-unlock/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
-  <a href="https://github.com/shoon/fv-ssh-unlock/releases/tag/v0.2.0-rc.5"><img src="https://img.shields.io/badge/prerelease-v0.2.0--rc.5-orange" alt="v0.2.0-rc.5 prerelease"></a>
+  <a href="https://github.com/shoon/fv-ssh-unlock/releases/tag/v0.2.0"><img src="https://img.shields.io/badge/release-v0.2.0-2ea44f" alt="v0.2.0 release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/shoon/fv-ssh-unlock" alt="Apache 2.0 license"></a>
   <img src="https://img.shields.io/badge/Go-1.26.10-00ADD8?logo=go&amp;logoColor=white" alt="Go 1.26.10 or newer">
   <img src="https://img.shields.io/badge/target-macOS%2026%2B-111111" alt="Targets macOS 26 or newer">
@@ -40,11 +40,10 @@ container to recover explicitly authorized Macs after a power event.
 > This is an independent open source project. It is not affiliated with,
 > sponsored by, or endorsed by Apple Inc. See [TRADEMARKS.md](TRADEMARKS.md).
 
-> [!CAUTION]
+> [!NOTE]
 > The daemon, TUI, candidate inbox, secure-provider model, and service/container
-> deployment described here are the **v0.2.0-rc.5 prerelease**. The current
-> stable `v0.1.0` release does not contain those commands. Use the pinned
-> prerelease downloads and installation commands below while evaluating them.
+> deployment described here require **v0.2.0** or newer. The older `v0.1.0`
+> release does not contain those commands.
 
 ## Contents
 
@@ -132,8 +131,8 @@ scoop bucket add shoon https://github.com/shoon/scoop-bucket
 scoop install shoon/fv-ssh-unlock
 ```
 
-Or download the `v0.2.0-rc.5` archive for your client computer from the
-[prerelease page](https://github.com/shoon/fv-ssh-unlock/releases/tag/v0.2.0-rc.5),
+Or download the `v0.2.0` archive for your client computer from the
+[release page](https://github.com/shoon/fv-ssh-unlock/releases/tag/v0.2.0),
 extract it, and place `fv-ssh-unlock` or `fv-ssh-unlock.exe` on your `PATH`.
 Release binaries include OS-keyring support.
 
@@ -143,7 +142,7 @@ Linux DEB/RPM availability, and the stable-only WinGet plan.
 You can also build from source:
 
 ```bash
-git clone --branch v0.2.0-rc.5 --depth 1 \
+git clone --branch v0.2.0 --depth 1 \
   https://github.com/shoon/fv-ssh-unlock.git
 cd fv-ssh-unlock
 go build -tags keyring -o fv-ssh-unlock ./cmd/fv-ssh-unlock
@@ -233,10 +232,10 @@ workflow](docs/use-cases.md#keep-homelab-macs-available-after-a-power-outage)
 and the [native systemd deployment](docs/containers-and-services.md#native-systemd).
 
 The [public minimal container](https://hub.docker.com/r/shoonimages/fv-ssh-unlock)
-is also available as a versioned prerelease image:
+is also available as a versioned image:
 
 ```bash
-docker pull shoonimages/fv-ssh-unlock:v0.2.0-rc.5
+docker pull shoonimages/fv-ssh-unlock:v0.2.0
 ```
 
 Do not start it with an ad hoc password bind mount. The
