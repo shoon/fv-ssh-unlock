@@ -10,18 +10,18 @@ signed checksum file and per-archive SBOMs.
 
 | Channel | Status | Architectures | Update behavior |
 | --- | --- | --- | --- |
-| Homebrew tap | Available for the current prerelease | macOS and Linux, AMD64 and ARM64 | `brew update` and `brew upgrade` |
-| Scoop bucket | Available for the current prerelease | Windows AMD64 and ARM64 | `scoop update` and `scoop update fv-ssh-unlock` |
+| Homebrew tap | Available | macOS and Linux, AMD64 and ARM64 | `brew update` and `brew upgrade` |
+| Scoop bucket | Available | Windows AMD64 and ARM64 | `scoop update` and `scoop update fv-ssh-unlock` |
 | GitHub release archives | Available | macOS, Linux, and Windows on AMD64 and ARM64 | Download each version explicitly |
-| DEB and RPM release assets | Available for the current prerelease | Linux AMD64 and ARM64 | Install each downloaded package explicitly; this is not an APT or DNF repository |
-| WinGet community repository | Planned for stable `v0.2.0` | Windows AMD64 and ARM64 | Normal WinGet upgrades after Microsoft accepts the initial manifest |
+| DEB and RPM release assets | Available | Linux AMD64 and ARM64 | Install each downloaded package explicitly; this is not an APT or DNF repository |
+| WinGet community repository | Planned, starting from `v0.2.0` | Windows AMD64 and ARM64 | Normal WinGet upgrades after Microsoft accepts the initial manifest |
 | Docker Hub | Available | Linux AMD64 and ARM64 | Pull an explicit version or digest |
 
-The project-owned Homebrew tap and Scoop bucket intentionally carry the
-prerelease because users must opt into those sources. WinGet's normal community
-catalog does not provide a reliable separate prerelease channel, so the
-project will submit its first public WinGet manifest only for stable `v0.2.0`.
-The current prerelease is not being presented as a stable package.
+The project-owned Homebrew tap and Scoop bucket may also carry release
+candidates, because users opt into those sources. WinGet's normal community
+catalog does not provide a reliable separate prerelease channel, so WinGet will
+only ever receive stable versions, starting with the first manifest for
+`v0.2.0`.
 
 ## Homebrew
 
@@ -46,7 +46,7 @@ brew uninstall fv-ssh-unlock
 This is a third-party tap, not `homebrew/core`. Homebrew requires upstream to
 designate a stable release before a formula is eligible for core, and new
 projects must also meet Homebrew's notability requirements. The project tap is
-the supported Homebrew source during the prerelease.
+the supported Homebrew source.
 
 ## Scoop
 
@@ -69,7 +69,7 @@ scoop uninstall fv-ssh-unlock
 ## DEB and RPM files
 
 The release workflow produces `.deb` and `.rpm` files for Linux AMD64 and
-ARM64. These packages are available on the current prerelease page. The older
+ARM64. These packages are attached to each release page. The older
 `v0.2.0-rc.2` release predates native package publication and contains archives
 only.
 

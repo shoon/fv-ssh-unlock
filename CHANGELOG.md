@@ -4,6 +4,19 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-31
+
+First stable release of the 0.2.0 series: the daemon, TUI, candidate inbox,
+secure-provider model, service/container deployment, and native packages
+described in the release candidates below. The shipped code is identical to
+0.2.0-rc.5.
+
+### Changed
+
+- Prepare tagged release now verifies the published release in the same run,
+  so one dispatch tags, publishes, and verifies.
+- Documentation now targets the stable release instead of a prerelease.
+
 ## [0.2.0-rc.5] - 2026-10-31
 
 ### Security
